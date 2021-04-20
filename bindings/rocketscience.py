@@ -83,6 +83,18 @@ class RustBuffer(ctypes.Structure):
     # easier for us to hide these implementation details from consumers, in the face
     # of python's free-for-all type system.
 
+    # The primitive String type.
+
+    @staticmethod
+    def allocFromString(value):
+        with RustBuffer.allocWithBuilder() as builder:
+            builder.write(value.encode("utf-8"))
+            return builder.finalize()
+
+    def consumeIntoString(self):
+        with self.consumeWithStream() as stream:
+            return stream.read(stream.remaining()).decode("utf-8")
+
     # The Enum type Direction.
 
     @staticmethod
@@ -106,18 +118,6 @@ class RustBuffer(ctypes.Structure):
     def consumeIntoRecordPart(self):
         with self.consumeWithStream() as stream:
             return stream.readRecordPart()
-
-    # The primitive String type.
-
-    @staticmethod
-    def allocFromString(value):
-        with RustBuffer.allocWithBuilder() as builder:
-            builder.write(value.encode("utf-8"))
-            return builder.finalize()
-
-    def consumeIntoString(self):
-        with self.consumeWithStream() as stream:
-            return stream.read(stream.remaining()).decode("utf-8")
 
 
 class ForeignBytes(ctypes.Structure):
@@ -162,25 +162,18 @@ class RustBufferStream(object):
     # implementation details from consumers, in the face of python's free-for-all type
     # system.
 
-    def readBool(self):
-        v = self._unpack_from(1, ">b")
-        if v == 0:
-            return False
-        if v == 1:
-            return True
-        raise InternalError("Unexpected byte for Boolean type")
+    def readString(self):
+        size = self._unpack_from(4, ">i")
+        if size < 0:
+            raise InternalError("Unexpected negative string length")
+        utf8Bytes = self.read(size)
+        return utf8Bytes.decode("utf-8")
 
     # The Enum type Direction.
 
     def readEnumDirection(self):
         variant = self._unpack_from(4, ">i")
         return Direction(variant)
-
-    # The Error type LaunchError.
-    # Errors cannot currently be serialized, but we can produce a helpful error.
-
-    def readErrorLaunchError(self):
-        raise InternalError("RustBufferStream.read not implemented yet for ErrorLaunchError")
 
     # The Record type Part.
 
@@ -191,12 +184,16 @@ class RustBufferStream(object):
             self.readU64()
         )
 
-    def readString(self):
-        size = self._unpack_from(4, ">i")
-        if size < 0:
-            raise InternalError("Unexpected negative string length")
-        utf8Bytes = self.read(size)
-        return utf8Bytes.decode("utf-8")
+    def readU64(self):
+        return self._unpack_from(8, ">Q")
+
+    def readBool(self):
+        v = self._unpack_from(1, ">b")
+        if v == 0:
+            return False
+        if v == 1:
+            return True
+        raise InternalError("Unexpected byte for Boolean type")
 
     # The Object type Rocket.
     # Objects cannot currently be serialized, but we can produce a helpful error.
@@ -204,8 +201,11 @@ class RustBufferStream(object):
     def readObjectRocket(self):
         raise InternalError("RustBufferStream.read not implemented yet for ObjectRocket")
 
-    def readU64(self):
-        return self._unpack_from(8, ">Q")
+    # The Error type LaunchError.
+    # Errors cannot currently be serialized, but we can produce a helpful error.
+
+    def readErrorLaunchError(self):
+        raise InternalError("RustBufferStream.read not implemented yet for ErrorLaunchError")
 
 class RustBufferBuilder(object):
     """Helper for structured writing of values into a RustBuffer."""
@@ -248,19 +248,15 @@ class RustBufferBuilder(object):
     # these implementation details from consumers, in the face of python's free-for-all
     # type system.
 
-    def writeBool(self, v):
-        self._pack_into(1, ">b", 1 if v else 0)
+    def writeString(self, v):
+        utf8Bytes = v.encode("utf-8")
+        self._pack_into(4, ">i", len(utf8Bytes))
+        self.write(utf8Bytes)
 
     # The Enum type Direction.
 
     def writeEnumDirection(self, v):
         self._pack_into(4, ">i", v.value)
-
-    # The Error type LaunchError.
-    # Errors cannot currently be serialized, but we can produce a helpful error.
-
-    def writeErrorLaunchError(self):
-        raise InternalError("RustBufferStream.write() not implemented yet for ErrorLaunchError")
 
     # The Record type Part.
 
@@ -269,10 +265,11 @@ class RustBufferBuilder(object):
         self.writeU64(v.cost)
         self.writeU64(v.weight)
 
-    def writeString(self, v):
-        utf8Bytes = v.encode("utf-8")
-        self._pack_into(4, ">i", len(utf8Bytes))
-        self.write(utf8Bytes)
+    def writeU64(self, v):
+        self._pack_into(8, ">Q", v)
+
+    def writeBool(self, v):
+        self._pack_into(1, ">b", 1 if v else 0)
 
     # The Object type Rocket.
     # Objects cannot currently be serialized, but we can produce a helpful error.
@@ -280,8 +277,11 @@ class RustBufferBuilder(object):
     def writeObjectRocket(self):
         raise InternalError("RustBufferStream.write() not implemented yet for ObjectRocket")
 
-    def writeU64(self, v):
-        self._pack_into(8, ">Q", v)
+    # The Error type LaunchError.
+    # Errors cannot currently be serialized, but we can produce a helpful error.
+
+    def writeErrorLaunchError(self):
+        raise InternalError("RustBufferStream.write() not implemented yet for ErrorLaunchError")
 
 # Error definitions
 class RustError(ctypes.Structure):
