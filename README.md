@@ -8,19 +8,25 @@ This project was used as an example at the [Rust Linz Meetup in April 2021](http
 
 Tests are implemented in the respective languages. See [`tests/bindings/`](tests/bindings/) for a list of all implemented language bindings.
 
-You can run these tests using `cargo`:
+You can run all binding tests using `cargo`:
 
 ```
-cargo test
+cargo xtask test
 ```
 
 Caution: This will require `swift`, `kotlinc` and `python3`.
-If you want to run only a single of these tests, edit [`tests/test_generated_bindings.rs`](tests/test_generated_bindings.rs).
+If you want to run tests for only a single language you can do so:
+
+```
+cargo xtask test kotlin
+cargo xtask test swift
+cargo xtask test python
+```
 
 ## Generate bindings code
 
 When just testing all code is generated at build time.
-If you want to generate the code for inspection, 
+If you want to generate the code for inspection,
 to check it into source control or for other purposes
 use [`uniffi_bindgen`].
 
