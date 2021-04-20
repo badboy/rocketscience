@@ -49,6 +49,7 @@ fn test() -> Result<()> {
 }
 
 fn generate() -> Result<()> {
+    cmd!("uniffi-bindgen scaffolding ./src/rocketscience.udl -o bindings").run()?;
     cmd!("uniffi-bindgen generate ./src/rocketscience.udl -l kotlin -o bindings").run()?;
     cmd!("uniffi-bindgen generate ./src/rocketscience.udl -l swift -o bindings").run()?;
     cmd!("uniffi-bindgen generate ./src/rocketscience.udl -l python -o bindings").run()?;
