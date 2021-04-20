@@ -36,12 +36,10 @@ To install it:
 cargo install uniffi_bindgen
 ```
 
-To generate the bindings:
+To generate the bindings in the `bindings/` directory:
 
 ```
-uniffi-bindgen generate ./src/rocketscience.udl -l kotlin -o bindings
-uniffi-bindgen generate ./src/rocketscience.udl -l swift -o bindings
-uniffi-bindgen generate ./src/rocketscience.udl -l python -o bindings
+cargo xtask generate
 ```
 
 
