@@ -3,6 +3,8 @@ name = "rocketscience"
 version = "0.1.0"
 authors = ["Jan-Erik Rediger <janerik@fnordig.de>"]
 edition = "2018"
+publish = false
+license = "MIT"
 
 [lib]
 crate-type = ["staticlib", "cdylib", "lib"]
