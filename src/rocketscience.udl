@@ -1,0 +1,31 @@
+namespace rocketscience {
+};
+
+[Error]
+enum LaunchError {
+  "RocketLaunch",
+};
+
+enum Direction {
+    "Up",
+    "Down",
+};
+
+dictionary Part {
+    string name;
+    u64 cost;
+    u64 weight;
+};
+
+interface Rocket {
+    constructor(string name);
+
+    string show();
+
+    [Throws=LaunchError]
+    boolean launch();
+
+    void add(Part part);
+
+    void lock_steering(Direction direction);
+};

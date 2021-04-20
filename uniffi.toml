@@ -1,0 +1,9 @@
+[bindings.swift]
+cdylib_name = "rocketscience"
+
+[bindings.kotlin]
+package_name = "net.rediger.uniffi.rocketscience"
+cdylib_name = "rocketscience"
+
+[bindings.python]
+cdylib_name = "rocketscience"

@@ -1,0 +1,17 @@
+[package]
+name = "rocketscience"
+version = "0.1.0"
+authors = ["Jan-Erik Rediger <janerik@fnordig.de>"]
+edition = "2018"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
+name = "rocketscience"
+
+[dependencies]
+uniffi_macros = "0.8.0"
+uniffi = "0.8.0"
+thiserror = "1.0"
+
+[build-dependencies]
+uniffi_build = { version = "0.8.0", features = ["builtin-bindgen"] }
