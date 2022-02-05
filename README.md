@@ -3,6 +3,7 @@
 A project demonstrating how to use [UniFFI] to write a cross-platform Rust library and auto-generate bindings in different languages.
 
 This project was used as an example at the [Rust Linz Meetup in April 2021](https://www.meetup.com/Rust-Linz/events/276521001/) during my talk "Leveraging Rust to build cross-platform mobile libraries".
+It was updated to UniFFI 0.17 for my [Rust Nigeria Lightning Talk in February 2022](https://skillsmatter.com/meetups/13752-rust-nigeria-ama) titled "Rust in a UniFFIed World".
 
 ## Tests
 
