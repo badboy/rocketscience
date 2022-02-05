@@ -6,7 +6,7 @@
 # Ideally this would live in a separate .py file where it can be unittested etc
 # in isolation, and perhaps even published as a re-useable package.
 #
-# However, it's important that the detils of how this helper code works (e.g. the
+# However, it's important that the details of how this helper code works (e.g. the
 # way that different builtin types are passed across the FFI) exactly match what's
 # expected by the rust code on the other side of the interface. In practice right
 # now that means coming from the exact some version of `uniffi` that was used to
@@ -19,6 +19,7 @@ import ctypes
 import enum
 import struct
 import contextlib
+import datetime
 
 
 class RustBuffer(ctypes.Structure):
@@ -26,20 +27,18 @@ class RustBuffer(ctypes.Structure):
         ("capacity", ctypes.c_int32),
         ("len", ctypes.c_int32),
         ("data", ctypes.POINTER(ctypes.c_char)),
-        # Ref https://github.com/mozilla/uniffi-rs/issues/334 for this weird "padding" field.
-        ("padding", ctypes.c_int64),
     ]
 
     @staticmethod
     def alloc(size):
-        return rust_call_with_error(InternalError, _UniFFILib.ffi_rocketscience_3a9e_rustbuffer_alloc, size)
+        return rust_call(_UniFFILib.ffi_rocketscience_b310_rustbuffer_alloc, size)
 
     @staticmethod
     def reserve(rbuf, additional):
-        return rust_call_with_error(InternalError, _UniFFILib.ffi_rocketscience_3a9e_rustbuffer_reserve, rbuf, additional)
+        return rust_call(_UniFFILib.ffi_rocketscience_b310_rustbuffer_reserve, rbuf, additional)
 
     def free(self):
-        return rust_call_with_error(InternalError, _UniFFILib.ffi_rocketscience_3a9e_rustbuffer_free, self)
+        return rust_call(_UniFFILib.ffi_rocketscience_b310_rustbuffer_free, self)
 
     def __str__(self):
         return "RustBuffer(capacity={}, len={}, data={})".format(
@@ -77,63 +76,21 @@ class RustBuffer(ctypes.Structure):
         finally:
             self.free()
 
-    # For every type that lowers into a RustBuffer, we provide helper methods for
-    # conveniently doing the lifting and lowering. Putting them on this internal
-    # helper object (rather than, say, as methods on the public classes) makes it
-    # easier for us to hide these implementation details from consumers, in the face
-    # of python's free-for-all type system.
-
-    # The primitive String type.
-
-    @staticmethod
-    def allocFromString(value):
-        with RustBuffer.allocWithBuilder() as builder:
-            builder.write(value.encode("utf-8"))
-            return builder.finalize()
-
-    def consumeIntoString(self):
-        with self.consumeWithStream() as stream:
-            return stream.read(stream.remaining()).decode("utf-8")
-
-    # The Enum type Direction.
-
-    @staticmethod
-    def allocFromEnumDirection(v):
-        with RustBuffer.allocWithBuilder() as builder:
-            builder.writeEnumDirection(v)
-            return builder.finalize()
-
-    def consumeIntoEnumDirection(self):
-        with self.consumeWithStream() as stream:
-            return stream.readEnumDirection()
-
-    # The Record type Part.
-
-    @staticmethod
-    def allocFromRecordPart(v):
-        with RustBuffer.allocWithBuilder() as builder:
-            builder.writeRecordPart(v)
-            return builder.finalize()
-
-    def consumeIntoRecordPart(self):
-        with self.consumeWithStream() as stream:
-            return stream.readRecordPart()
-
 
 class ForeignBytes(ctypes.Structure):
     _fields_ = [
         ("len", ctypes.c_int32),
         ("data", ctypes.POINTER(ctypes.c_char)),
-        # Ref https://github.com/mozilla/uniffi-rs/issues/334 for these weird "padding" fields.
-        ("padding", ctypes.c_int64),
-        ("padding2", ctypes.c_int32),
     ]
 
     def __str__(self):
         return "ForeignBytes(len={}, data={})".format(self.len, self.data[0:self.len])
 
+
 class RustBufferStream(object):
-    """Helper for structured reading of values from a RustBuffer."""
+    """
+    Helper for structured reading of bytes from a RustBuffer
+    """
 
     def __init__(self, rbuf):
         self.rbuf = rbuf
@@ -156,59 +113,42 @@ class RustBufferStream(object):
         self.offset += size
         return data
 
-    # For every type used in the interface, we provide helper methods for conveniently
-    # reading that type in a buffer. Putting them on this internal helper object (rather
-    # than, say, as methods on the public classes) makes it easier for us to hide these
-    # implementation details from consumers, in the face of python's free-for-all type
-    # system.
+    def readI8(self):
+        return self._unpack_from(1, ">b")
 
-    def readString(self):
-        size = self._unpack_from(4, ">i")
-        if size < 0:
-            raise InternalError("Unexpected negative string length")
-        utf8Bytes = self.read(size)
-        return utf8Bytes.decode("utf-8")
+    def readU8(self):
+        return self._unpack_from(1, ">B")
 
-    # The Enum type Direction.
+    def readI16(self):
+        return self._unpack_from(2, ">h")
 
-    def readEnumDirection(self):
-        variant = self._unpack_from(4, ">i")
-        return Direction(variant)
+    def readU16(self):
+        return self._unpack_from(2, ">H")
 
-    # The Record type Part.
+    def readI32(self):
+        return self._unpack_from(4, ">i")
 
-    def readRecordPart(self):
-        return Part(
-            self.readString(),
-            self.readU64(),
-            self.readU64()
-        )
+    def readU32(self):
+        return self._unpack_from(4, ">I")
+
+    def readI64(self):
+        return self._unpack_from(8, ">q")
 
     def readU64(self):
         return self._unpack_from(8, ">Q")
 
-    def readBool(self):
-        v = self._unpack_from(1, ">b")
-        if v == 0:
-            return False
-        if v == 1:
-            return True
-        raise InternalError("Unexpected byte for Boolean type")
+    def readFloat(self):
+        v = self._unpack_from(4, ">f")
+        return v
 
-    # The Object type Rocket.
-    # Objects cannot currently be serialized, but we can produce a helpful error.
+    def readDouble(self):
+        return self._unpack_from(8, ">d")
 
-    def readObjectRocket(self):
-        raise InternalError("RustBufferStream.read not implemented yet for ObjectRocket")
-
-    # The Error type LaunchError.
-    # Errors cannot currently be serialized, but we can produce a helpful error.
-
-    def readErrorLaunchError(self):
-        raise InternalError("RustBufferStream.read not implemented yet for ErrorLaunchError")
 
 class RustBufferBuilder(object):
-    """Helper for structured writing of values into a RustBuffer."""
+    """
+    Helper for structured writing of bytes into a RustBuffer.
+    """
 
     def __init__(self):
         self.rbuf = RustBuffer.alloc(16)
@@ -242,95 +182,203 @@ class RustBufferBuilder(object):
             for i, byte in enumerate(value):
                 self.rbuf.data[self.rbuf.len + i] = byte
 
-    # For every type used in the interface, we provide helper methods for conveniently
-    # writing values of that type in a buffer. Putting them on this internal helper object
-    # (rather than, say, as methods on the public classes) makes it easier for us to hide
-    # these implementation details from consumers, in the face of python's free-for-all
-    # type system.
+    def writeI8(self, v):
+        self._pack_into(1, ">b", v)
 
-    def writeString(self, v):
-        utf8Bytes = v.encode("utf-8")
-        self._pack_into(4, ">i", len(utf8Bytes))
-        self.write(utf8Bytes)
+    def writeU8(self, v):
+        self._pack_into(1, ">B", v)
 
-    # The Enum type Direction.
+    def writeI16(self, v):
+        self._pack_into(2, ">h", v)
 
-    def writeEnumDirection(self, v):
-        self._pack_into(4, ">i", v.value)
+    def writeU16(self, v):
+        self._pack_into(2, ">H", v)
 
-    # The Record type Part.
+    def writeI32(self, v):
+        self._pack_into(4, ">i", v)
 
-    def writeRecordPart(self, v):
-        self.writeString(v.name)
-        self.writeU64(v.cost)
-        self.writeU64(v.weight)
+    def writeU32(self, v):
+        self._pack_into(4, ">I", v)
+
+    def writeI64(self, v):
+        self._pack_into(8, ">q", v)
 
     def writeU64(self, v):
         self._pack_into(8, ">Q", v)
 
-    def writeBool(self, v):
-        self._pack_into(1, ">b", 1 if v else 0)
+    def writeFloat(self, v):
+        self._pack_into(4, ">f", v)
 
-    # The Object type Rocket.
-    # Objects cannot currently be serialized, but we can produce a helpful error.
-
-    def writeObjectRocket(self):
-        raise InternalError("RustBufferStream.write() not implemented yet for ObjectRocket")
-
-    # The Error type LaunchError.
-    # Errors cannot currently be serialized, but we can produce a helpful error.
-
-    def writeErrorLaunchError(self):
-        raise InternalError("RustBufferStream.write() not implemented yet for ErrorLaunchError")
-
-# Error definitions
-class RustError(ctypes.Structure):
-    _fields_ = [
-        ("code", ctypes.c_int32),
-        ("message", ctypes.c_void_p),
-    ]
-
-    def free(self):
-        rust_call_with_error(InternalError, _UniFFILib.ffi_rocketscience_3a9e_string_free, self.message)
-
-    def __str__(self):
-        return "RustError(code={}, message={})".format(
-            self.code,
-            str(ctypes.cast(self.message, ctypes.c_char_p).value, "utf-8"),
-        )
+    def writeDouble(self, v):
+        self._pack_into(8, ">d", v)
+# A handful of classes and functions to support the generated data structures.
+# This would be a good candidate for isolating in its own ffi-support lib.
 
 class InternalError(Exception):
-    @staticmethod
-    def raise_err(code, message):
-        raise InternalError(message)
+    pass
 
+class RustCallStatus(ctypes.Structure):
+    """
+    Error runtime.
+    """
+    _fields_ = [
+        ("code", ctypes.c_int8),
+        ("error_buf", RustBuffer),
+    ]
 
-class LaunchError:
-    class RocketLaunch(Exception):
-        pass
+    # These match the values from the uniffi::rustcalls module
+    CALL_SUCCESS = 0
+    CALL_ERROR = 1
+    CALL_PANIC = 2
 
-    @staticmethod
-    def raise_err(code, message):
-        if code == 1:
-            raise LaunchError.RocketLaunch(message)
-        
-        raise Exception("Unknown error code")
+    def __str__(self):
+        if self.code == RustCallStatus.CALL_SUCCESS:
+            return "RustCallStatus(CALL_SUCCESS)"
+        elif self.code == RustCallStatus.CALL_ERROR:
+            return "RustCallStatus(CALL_ERROR)"
+        elif self.code == RustCallStatus.CALL_PANIC:
+            return "RustCallStatus(CALL_PANIC)"
+        else:
+            return "RustCallStatus(<invalid code>)"
 
+def rust_call(fn, *args):
+    # Call a rust function
+    return rust_call_with_error(None, fn, *args)
 
 def rust_call_with_error(error_class, fn, *args):
-    error = RustError()
-    error.code = 0
+    # Call a rust function and handle any errors
+    #
+    # This function is used for rust calls that return Result<> and therefore can set the CALL_ERROR status code.
+    # error_class must be set to the error class that corresponds to the result.
+    call_status = RustCallStatus(code=RustCallStatus.CALL_SUCCESS, error_buf=RustBuffer(0, 0, None))
 
-    args_with_error = args + (ctypes.byref(error),)
+    args_with_error = args + (ctypes.byref(call_status),)
     result = fn(*args_with_error)
-    if error.code != 0:
-        message = str(error)
-        error.free()
+    if call_status.code == RustCallStatus.CALL_SUCCESS:
+        return result
+    elif call_status.code == RustCallStatus.CALL_ERROR:
+        if error_class is None:
+            call_status.err_buf.contents.free()
+            raise InternalError("rust_call_with_error: CALL_ERROR, but no error class set")
+        else:
+            raise error_class._lift(call_status.error_buf)
+    elif call_status.code == RustCallStatus.CALL_PANIC:
+        # When the rust code sees a panic, it tries to construct a RustBuffer
+        # with the message.  But if that code panics, then it just sends back
+        # an empty buffer.
+        if call_status.error_buf.len > 0:
+            msg = FfiConverterString._lift(call_status.error_buf)
+        else:
+            msg = "Unknown rust panic"
+        raise InternalError(msg)
+    else:
+        raise InternalError("Invalid RustCallStatus code: {}".format(
+            call_status.code))
 
-        error_class.raise_err(error.code, message)
-    
-    return result
+# A function pointer for a callback as defined by UniFFI.
+# Rust definition `fn(handle: u64, method: u32, args: RustBuffer, buf_ptr: *mut RustBuffer) -> int`
+FOREIGN_CALLBACK_T = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_ulonglong, ctypes.c_ulong, RustBuffer, ctypes.POINTER(RustBuffer))
+# Types conforming to `Primitive` pass themselves directly over the FFI.
+class Primitive:
+    @classmethod
+    def _lift(cls, value):
+        return value
 
+    @classmethod
+    def _lower(cls, value):
+        return value
+
+# Helper class for new types that will always go through a RustBuffer.
+# Classes should inherit from this and implement the `_read` static method
+# and `_write` instance methods.
+class ViaFfiUsingByteBuffer:
+    @classmethod
+    def _lift(cls, rbuf):
+        with rbuf.consumeWithStream() as stream:
+            return cls._read(stream)
+
+    def _lower(self):
+        with RustBuffer.allocWithBuilder() as builder:
+            self._write(builder)
+            return builder.finalize()
+
+# Helper class for wrapper types that will always go through a RustBuffer.
+# Classes should inherit from this and implement the `_read` and `_write` static methods.
+class FfiConverterUsingByteBuffer:
+    @classmethod
+    def _lift(cls, rbuf):
+        with rbuf.consumeWithStream() as stream:
+            return cls._read(stream)
+
+    @classmethod
+    def _lower(cls, value):
+        with RustBuffer.allocWithBuilder() as builder:
+            cls._write(value, builder)
+            return builder.finalize()
+
+# Helpers for structural types.
+
+class FfiConverterSequence:
+    @staticmethod
+    def _write(value, buf, writeItem):
+        items = len(value)
+        buf.writeI32(items)
+        for item in value:
+            writeItem(item, buf)
+
+    @staticmethod
+    def _read(buf, readItem):
+        count = buf.readI32()
+        if count < 0:
+            raise InternalError("Unexpected negative sequence length")
+
+        items = []
+        while count > 0:
+            items.append(readItem(buf))
+            count -= 1
+        return items
+
+class FfiConverterOptional:
+    @staticmethod
+    def _write(value, buf, writeItem):
+        if value is None:
+            buf.writeU8(0)
+            return
+
+        buf.writeU8(1)
+        writeItem(value, buf)
+
+    @staticmethod
+    def _read(buf, readItem):
+        flag = buf.readU8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return readItem(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class FfiConverterDictionary:
+    @staticmethod
+    def _write(items, buf, writeItem):
+        buf.writeI32(len(items))
+        for (key, value) in items.items():
+            writeItem(key, value, buf)
+
+    @staticmethod
+    def _read(buf, readItem):
+        count = buf.readI32()
+        if count < 0:
+            raise InternalError("Unexpected negative map size")
+        items = {}
+        while count > 0:
+            key, value = readItem(buf)
+            items[key] = value
+            count -= 1
+        return items
+
+# Contains loading, initialization code,
+# and the FFI Function declarations in a com.sun.jna.Library.
 # This is how we find and load the dynamic library provided by the component.
 # For now we just look it up by name.
 #
@@ -358,78 +406,154 @@ def loadIndirect():
 # This is an implementation detail which will be called internally by the public API.
 
 _UniFFILib = loadIndirect()
-_UniFFILib.ffi_rocketscience_3a9e_Rocket_object_free.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(RustError),
+_UniFFILib.ffi_rocketscience_b310_Rocket_object_free.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.ffi_rocketscience_3a9e_Rocket_object_free.restype = None
-_UniFFILib.rocketscience_3a9e_Rocket_new.argtypes = (
+_UniFFILib.ffi_rocketscience_b310_Rocket_object_free.restype = None
+_UniFFILib.rocketscience_b310_Rocket_new.argtypes = (
     RustBuffer,
-    ctypes.POINTER(RustError),
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.rocketscience_3a9e_Rocket_new.restype = ctypes.c_uint64
-_UniFFILib.rocketscience_3a9e_Rocket_show.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(RustError),
+_UniFFILib.rocketscience_b310_Rocket_new.restype = ctypes.c_void_p
+_UniFFILib.rocketscience_b310_Rocket_show.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.rocketscience_3a9e_Rocket_show.restype = RustBuffer
-_UniFFILib.rocketscience_3a9e_Rocket_launch.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(RustError),
+_UniFFILib.rocketscience_b310_Rocket_show.restype = RustBuffer
+_UniFFILib.rocketscience_b310_Rocket_launch.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.rocketscience_3a9e_Rocket_launch.restype = ctypes.c_int8
-_UniFFILib.rocketscience_3a9e_Rocket_add.argtypes = (
-    ctypes.c_uint64,
+_UniFFILib.rocketscience_b310_Rocket_launch.restype = ctypes.c_int8
+_UniFFILib.rocketscience_b310_Rocket_add.argtypes = (
+    ctypes.c_void_p,
     RustBuffer,
-    ctypes.POINTER(RustError),
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.rocketscience_3a9e_Rocket_add.restype = None
-_UniFFILib.rocketscience_3a9e_Rocket_lock_steering.argtypes = (
-    ctypes.c_uint64,
+_UniFFILib.rocketscience_b310_Rocket_add.restype = None
+_UniFFILib.rocketscience_b310_Rocket_lock_steering.argtypes = (
+    ctypes.c_void_p,
     RustBuffer,
-    ctypes.POINTER(RustError),
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.rocketscience_3a9e_Rocket_lock_steering.restype = None
-_UniFFILib.ffi_rocketscience_3a9e_rustbuffer_alloc.argtypes = (
+_UniFFILib.rocketscience_b310_Rocket_lock_steering.restype = None
+_UniFFILib.ffi_rocketscience_b310_rustbuffer_alloc.argtypes = (
     ctypes.c_int32,
-    ctypes.POINTER(RustError),
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.ffi_rocketscience_3a9e_rustbuffer_alloc.restype = RustBuffer
-_UniFFILib.ffi_rocketscience_3a9e_rustbuffer_from_bytes.argtypes = (
+_UniFFILib.ffi_rocketscience_b310_rustbuffer_alloc.restype = RustBuffer
+_UniFFILib.ffi_rocketscience_b310_rustbuffer_from_bytes.argtypes = (
     ForeignBytes,
-    ctypes.POINTER(RustError),
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.ffi_rocketscience_3a9e_rustbuffer_from_bytes.restype = RustBuffer
-_UniFFILib.ffi_rocketscience_3a9e_rustbuffer_free.argtypes = (
+_UniFFILib.ffi_rocketscience_b310_rustbuffer_from_bytes.restype = RustBuffer
+_UniFFILib.ffi_rocketscience_b310_rustbuffer_free.argtypes = (
     RustBuffer,
-    ctypes.POINTER(RustError),
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.ffi_rocketscience_3a9e_rustbuffer_free.restype = None
-_UniFFILib.ffi_rocketscience_3a9e_rustbuffer_reserve.argtypes = (
+_UniFFILib.ffi_rocketscience_b310_rustbuffer_free.restype = None
+_UniFFILib.ffi_rocketscience_b310_rustbuffer_reserve.argtypes = (
     RustBuffer,
     ctypes.c_int32,
-    ctypes.POINTER(RustError),
+    ctypes.POINTER(RustCallStatus),
 )
-_UniFFILib.ffi_rocketscience_3a9e_rustbuffer_reserve.restype = RustBuffer
-_UniFFILib.ffi_rocketscience_3a9e_string_free.argtypes = (
-    ctypes.c_voidp,
-    ctypes.POINTER(RustError),
-)
-_UniFFILib.ffi_rocketscience_3a9e_string_free.restype = None
+_UniFFILib.ffi_rocketscience_b310_rustbuffer_reserve.restype = RustBuffer
 
 # Public interface members begin here.
 
 
 
 
-
-class Direction(enum.Enum):
+class Direction(ViaFfiUsingByteBuffer, enum.Enum):
     UP = 1
     DOWN = 2
     
 
+    @staticmethod
+    def _read(buf):
+        variant = buf.readI32()
+        if variant == 1:
+            return Direction.UP
+        if variant == 2:
+            return Direction.DOWN
+        
+        raise InternalError("Raw enum value doesn't match any cases")
 
-class Part(object):
+    def _write(self, buf):
+        if self is Direction.UP:
+            i = 1
+            buf.writeI32(1)
+        if self is Direction.DOWN:
+            i = 2
+            buf.writeI32(2)
+        
+
+
+
+
+class Rocket(object):
+    def __init__(self, name):
+        name = name
+        self._pointer = rust_call(_UniFFILib.rocketscience_b310_Rocket_new,FfiConverterString._lower(name))
+
+    def __del__(self):
+        # In case of partial initialization of instances.
+        pointer = getattr(self, "_pointer", None)
+        if pointer is not None:
+            rust_call(_UniFFILib.ffi_rocketscience_b310_Rocket_object_free, pointer)
+
+    # Used by alternative constructors or any methods which return this type.
+    @classmethod
+    def _make_instance_(cls, pointer):
+        # Lightly yucky way to bypass the usual __init__ logic
+        # and just create a new instance with the required pointer.
+        inst = cls.__new__(cls)
+        inst._pointer = pointer
+        return inst
+
+    
+
+    def show(self, ):
+        _retval = rust_call(_UniFFILib.rocketscience_b310_Rocket_show,self._pointer,)
+        return FfiConverterString._lift(_retval)
+    
+    def launch(self, ):
+        _retval = rust_call_with_error(
+    LaunchError,_UniFFILib.rocketscience_b310_Rocket_launch,self._pointer,)
+        return FfiConverterBool._lift(_retval)
+    
+    def add(self, part):
+        part = part
+        rust_call(_UniFFILib.rocketscience_b310_Rocket_add,self._pointer,part._lower())
+    
+    def lock_steering(self, direction):
+        direction = direction
+        rust_call(_UniFFILib.rocketscience_b310_Rocket_lock_steering,self._pointer,direction._lower())
+    
+    
+
+    @classmethod
+    def _read(cls, buf):
+        ptr = buf.readU64()
+        if ptr == 0:
+            raise InternalError("Raw pointer value was null")
+        return cls._lift(ptr)
+
+    @classmethod
+    def _write(cls, value, buf):
+        if not isinstance(value, Rocket):
+            raise TypeError("Expected Rocket instance, {} found".format(value.__class__.__name__))
+        buf.writeU64(value._lower())
+
+    @classmethod
+    def _lift(cls, pointer):
+        return cls._make_instance_(pointer)
+
+    def _lower(self):
+        return self._pointer
+
+class Part(ViaFfiUsingByteBuffer, object):
     def __init__(self,name, cost, weight ):
         self.name = name
         self.cost = cost
@@ -447,42 +571,89 @@ class Part(object):
             return False
         return True
 
-
-
-
-
-class Rocket(object):
-    def __init__(self, name):
-        name = name
-        self._handle = rust_call_with_error(InternalError,_UniFFILib.rocketscience_3a9e_Rocket_new,RustBuffer.allocFromString(name))\
-
-    def __del__(self):
-        rust_call_with_error(
-            InternalError,
-            _UniFFILib.ffi_rocketscience_3a9e_Rocket_object_free,
-            self._handle
+    @staticmethod
+    def _read(buf):
+        return Part(
+            name=FfiConverterString._read(buf),
+            cost=FfiConverterUInt64._read(buf),
+            weight=FfiConverterUInt64._read(buf)
         )
 
-    
+    def _write(self, buf):
+        FfiConverterString._write(self.name, buf)
+        FfiConverterUInt64._write(self.cost, buf)
+        FfiConverterUInt64._write(self.weight, buf)
 
-    def show(self, ):
-        _retval = rust_call_with_error(InternalError,_UniFFILib.rocketscience_3a9e_Rocket_show,self._handle,)
-        return _retval.consumeIntoString()
-    
-    def launch(self, ):
-        _retval = rust_call_with_error(LaunchError,_UniFFILib.rocketscience_3a9e_Rocket_launch,self._handle,)
-        return (True if _retval else False)
-    
-    def add(self, part):
-        part = part
-        rust_call_with_error(InternalError,_UniFFILib.rocketscience_3a9e_Rocket_add,self._handle,RustBuffer.allocFromRecordPart(part))
-    
-    def lock_steering(self, direction):
-        direction = direction
-        rust_call_with_error(InternalError,_UniFFILib.rocketscience_3a9e_Rocket_lock_steering,self._handle,RustBuffer.allocFromEnumDirection(direction))
-    
-    
+class LaunchError(ViaFfiUsingByteBuffer):
 
+    # Each variant is a nested class of the error itself.
+    # It just carries a string error message, so no special implementation is necessary.
+    class RocketLaunch(ViaFfiUsingByteBuffer, Exception):
+        def _write(self, buf):
+            buf.writeI32(1)
+            message = str(self)
+            FfiConverterString._write(message, buf)
+
+    @classmethod
+    def _read(cls, buf):
+        variant = buf.readI32()
+        if variant == 1:
+            return cls.RocketLaunch(FfiConverterString._read(buf))
+        
+        raise InternalError("Raw enum value doesn't match any cases")
+class FfiConverterUInt64(Primitive):
+    @staticmethod
+    def _read(buf):
+        return FfiConverterUInt64._lift(buf.readU64())
+
+    @staticmethod
+    def _write(value, buf):
+        buf.writeU64(FfiConverterUInt64._lower(value))
+class FfiConverterBool:
+    @staticmethod
+    def _read(buf):
+        return FfiConverterBool._lift(buf.readU8())
+
+    @staticmethod
+    def _write(value, buf):
+        buf.writeU8(FfiConverterBool._lower(value))
+
+    @staticmethod
+    def _lift(value):
+        return int(value) != 0
+
+    @staticmethod
+    def _lower(value):
+        return 1 if value else 0
+class FfiConverterString:
+    @staticmethod
+    def _read(buf):
+        size = buf.readI32()
+        if size < 0:
+            raise InternalError("Unexpected negative string length")
+        utf8Bytes = buf.read(size)
+        return utf8Bytes.decode("utf-8")
+
+    @staticmethod
+    def _write(value, buf):
+        utf8Bytes = value.encode("utf-8")
+        buf.writeI32(len(utf8Bytes))
+        buf.write(utf8Bytes)
+
+    @staticmethod
+    def _lift(buf):
+        with buf.consumeWithStream() as stream:
+            return stream.read(stream.remaining()).decode("utf-8")
+
+    @staticmethod
+    def _lower(value):
+        with RustBuffer.allocWithBuilder() as builder:
+            builder.write(value.encode("utf-8"))
+            return builder.finalize()
+# Helper code for Rocket class is found in ObjectTemplate.py
+# Helper code for Part record is found in RecordTemplate.py
+# Helper code for Direction enum is found in EnumTemplate.py
+# Helper code for LaunchError error is found in ErrorTemplate.py
 
 __all__ = [
     "InternalError",

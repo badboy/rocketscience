@@ -21,38 +21,41 @@ import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.Structure
+import com.sun.jna.ptr.ByReference
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
+// The Rust Buffer and 3 templated methods (alloc, free, reserve).
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
 // pointer to the underlying data.
 
-@Structure.FieldOrder("capacity", "len", "data", "padding")
+@Structure.FieldOrder("capacity", "len", "data")
 open class RustBuffer : Structure() {
     @JvmField var capacity: Int = 0
     @JvmField var len: Int = 0
     @JvmField var data: Pointer? = null
-    // Ref https://github.com/mozilla/uniffi-rs/issues/334 for this weird "padding" field.
-    @JvmField var padding: Long = 0
 
     class ByValue : RustBuffer(), Structure.ByValue
+    class ByReference : RustBuffer(), Structure.ByReference
 
     companion object {
-        internal fun alloc(size: Int = 0) = rustCall(InternalError.ByReference()) { err ->
-            _UniFFILib.INSTANCE.ffi_rocketscience_3a9e_rustbuffer_alloc(size, err)
+        internal fun alloc(size: Int = 0) = rustCall() { status ->
+            _UniFFILib.INSTANCE.ffi_rocketscience_b310_rustbuffer_alloc(size, status).also {
+                if(it.data == null) {
+                   throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
+               }
+            }
         }
 
-        internal fun free(buf: RustBuffer.ByValue) = rustCall(InternalError.ByReference()) { err ->
-            _UniFFILib.INSTANCE.ffi_rocketscience_3a9e_rustbuffer_free(buf, err)
+        internal fun free(buf: RustBuffer.ByValue) = rustCall() { status ->
+            _UniFFILib.INSTANCE.ffi_rocketscience_b310_rustbuffer_free(buf, status)
         }
 
-        internal fun reserve(buf: RustBuffer.ByValue, additional: Int) = rustCall(InternalError.ByReference()) { err ->
-            _UniFFILib.INSTANCE.ffi_rocketscience_3a9e_rustbuffer_reserve(buf, additional, err)
+        internal fun reserve(buf: RustBuffer.ByValue, additional: Int) = rustCall() { status ->
+            _UniFFILib.INSTANCE.ffi_rocketscience_b310_rustbuffer_reserve(buf, additional, status)
         }
     }
 
@@ -63,19 +66,35 @@ open class RustBuffer : Structure() {
         }
 }
 
+/**
+ * The equivalent of the `*mut RustBuffer` type.
+ * Required for callbacks taking in an out pointer.
+ *
+ * Size is the sum of all values in the struct.
+ */
+class RustBufferByReference : ByReference(16) {
+    /**
+     * Set the pointed-to `RustBuffer` to the given value.
+     */
+    fun setValue(value: RustBuffer.ByValue) {
+        // NOTE: The offsets are as they are in the C-like struct.
+        val pointer = getPointer()
+        pointer.setInt(0, value.capacity)
+        pointer.setInt(4, value.len)
+        pointer.setPointer(8, value.data)
+    }
+}
+
 // This is a helper for safely passing byte references into the rust code.
 // It's not actually used at the moment, because there aren't many things that you
 // can take a direct pointer to in the JVM, and if we're going to copy something
 // then we might as well copy it into a `RustBuffer`. But it's here for API
 // completeness.
 
-@Structure.FieldOrder("len", "data", "padding", "padding2")
+@Structure.FieldOrder("len", "data")
 open class ForeignBytes : Structure() {
     @JvmField var len: Int = 0
     @JvmField var data: Pointer? = null
-    // Ref https://github.com/mozilla/uniffi-rs/issues/334 for these weird "padding" fields.
-    @JvmField var padding: Long = 0
-    @JvmField var padding2: Int = 0
 
     class ByValue : ForeignBytes(), Structure.ByValue
 }
@@ -117,8 +136,12 @@ class RustBufferBuilder() {
     }
 
     fun discard() {
-        val rbuf = this.finalize()
-        RustBuffer.free(rbuf)
+        if(this.rbuf.data != null) {
+            // Free the current `RustBuffer`
+            RustBuffer.free(this.rbuf)
+            // Replace it with an empty RustBuffer.
+            this.setRustBuffer(RustBuffer.ByValue())
+        }
     }
 
     internal fun reserve(size: Int, write: (ByteBuffer) -> Unit) {
@@ -178,7 +201,6 @@ class RustBufferBuilder() {
 }
 
 // Helpers for reading primitive data types from a bytebuffer.
-
 internal fun<T> liftFromRustBuffer(rbuf: RustBuffer.ByValue, readItem: (ByteBuffer) -> T): T {
     val buf = rbuf.asByteBuffer()!!
     try {
@@ -204,126 +226,85 @@ internal fun<T> lowerIntoRustBuffer(v: T, writeItem: (T, RustBufferBuilder) -> U
     }
 }
 
-// For every type used in the interface, we provide helper methods for conveniently
-// lifting and lowering that type from C-compatible data, and for reading and writing
-// values of that type in a buffer.
+// A handful of classes and functions to support the generated data structures.
+// This would be a good candidate for isolating in its own ffi-support lib.
+// Error runtime.
+@Structure.FieldOrder("code", "error_buf")
+internal open class RustCallStatus : Structure() {
+    @JvmField var code: Int = 0
+    @JvmField var error_buf: RustBuffer.ByValue = RustBuffer.ByValue()
 
+    fun isSuccess(): Boolean {
+        return code == 0
+    }
 
+    fun isError(): Boolean {
+        return code == 1
+    }
 
-
-internal fun String.Companion.lift(rbuf: RustBuffer.ByValue): String {
-    try {
-        val byteArr = ByteArray(rbuf.len)
-        rbuf.asByteBuffer()!!.get(byteArr)
-        return byteArr.toString(Charsets.UTF_8)
-    } finally {
-        RustBuffer.free(rbuf)
+    fun isPanic(): Boolean {
+        return code == 2
     }
 }
 
-internal fun String.Companion.read(buf: ByteBuffer): String {
-    val len = buf.getInt()
-    val byteArr = ByteArray(len)
-    buf.get(byteArr)
-    return byteArr.toString(Charsets.UTF_8)
+class InternalException(message: String) : Exception(message)
+
+// Each top-level error class has a companion object that can lift the error from the call status's rust buffer
+interface CallStatusErrorHandler<E> {
+    fun lift(error_buf: RustBuffer.ByValue): E;
 }
 
-internal fun String.lower(): RustBuffer.ByValue {
-    val byteArr = this.toByteArray(Charsets.UTF_8)
-    // Ideally we'd pass these bytes to `ffi_bytebuffer_from_bytes`, but doing so would require us
-    // to copy them into a JNA `Memory`. So we might as well directly copy them into a `RustBuffer`.
-    val rbuf = RustBuffer.alloc(byteArr.size)
-    rbuf.asByteBuffer()!!.put(byteArr)
-    return rbuf
+// Helpers for calling Rust
+// In practice we usually need to be synchronized to call this safely, so it doesn't
+// synchronize itself
+
+// Call a rust function that returns a Result<>.  Pass in the Error class companion that corresponds to the Err
+private inline fun <U, E: Exception> rustCallWithError(errorHandler: CallStatusErrorHandler<E>, callback: (RustCallStatus) -> U): U {
+    var status = RustCallStatus();
+    val return_value = callback(status)
+    if (status.isSuccess()) {
+        return return_value
+    } else if (status.isError()) {
+        throw errorHandler.lift(status.error_buf)
+    } else if (status.isPanic()) {
+        // when the rust code sees a panic, it tries to construct a rustbuffer
+        // with the message.  but if that code panics, then it just sends back
+        // an empty buffer.
+        if (status.error_buf.len > 0) {
+            throw InternalException(FfiConverterString.lift(status.error_buf))
+        } else {
+            throw InternalException("Rust panic")
+        }
+    } else {
+        throw InternalException("Unknown rust call status: $status.code")
+    }
 }
 
-internal fun String.write(buf: RustBufferBuilder) {
-    val byteArr = this.toByteArray(Charsets.UTF_8)
-    buf.putInt(byteArr.size)
-    buf.put(byteArr)
+// CallStatusErrorHandler implementation for times when we don't expect a CALL_ERROR
+object NullCallStatusErrorHandler: CallStatusErrorHandler<InternalException> {
+    override fun lift(error_buf: RustBuffer.ByValue): InternalException {
+        RustBuffer.free(error_buf)
+        return InternalException("Unexpected CALL_ERROR")
+    }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-@ExperimentalUnsignedTypes
-internal fun ULong.Companion.lift(v: Long): ULong {
-    return v.toULong()
+// Call a rust function that returns a plain value
+private inline fun <U> rustCall(callback: (RustCallStatus) -> U): U {
+    return rustCallWithError(NullCallStatusErrorHandler, callback);
 }
 
-@ExperimentalUnsignedTypes
-internal fun ULong.Companion.read(buf: ByteBuffer): ULong {
-    return ULong.lift(buf.getLong())
-}
-
-@ExperimentalUnsignedTypes
-internal fun ULong.lower(): Long {
-    return this.toLong()
-}
-
-@ExperimentalUnsignedTypes
-internal fun ULong.write(buf: RustBufferBuilder) {
-    buf.putLong(this.toLong())
-}
-
-
-
-
-
-internal fun Boolean.Companion.lift(v: Byte): Boolean {
-    return v.toInt() != 0
-}
-
-internal fun Boolean.Companion.read(buf: ByteBuffer): Boolean {
-    return Boolean.lift(buf.get())
-}
-
-internal fun Boolean.lower(): Byte {
-    return if (this) 1.toByte() else 0.toByte()
-}
-
-internal fun Boolean.write(buf: RustBufferBuilder) {
-    buf.putByte(this.lower())
-}
-
-
-
-
+// Contains loading, initialization code,
+// and the FFI Function declarations in a com.sun.jna.Library.
 @Synchronized
-fun findLibraryName(componentName: String): String {
-    val libOverride = System.getProperty("uniffi.component.${componentName}.libraryOverride")
+private fun findLibraryName(componentName: String): String {
+    val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
     if (libOverride != null) {
         return libOverride
     }
     return "rocketscience"
 }
 
-inline fun <reified Lib : Library> loadIndirect(
+private inline fun <reified Lib : Library> loadIndirect(
     componentName: String
 ): Lib {
     return Native.load<Lib>(findLibraryName(componentName), Lib::class.java)
@@ -334,386 +315,483 @@ inline fun <reified Lib : Library> loadIndirect(
 
 internal interface _UniFFILib : Library {
     companion object {
-        internal val INSTANCE: _UniFFILib by lazy { 
+        internal val INSTANCE: _UniFFILib by lazy {
             loadIndirect<_UniFFILib>(componentName = "rocketscience")
             
             
         }
     }
 
-    fun ffi_rocketscience_3a9e_Rocket_object_free(handle: Long
-    , uniffi_out_err: Structure.ByReference
+    fun ffi_rocketscience_b310_Rocket_object_free(ptr: Pointer,
+    _uniffi_out_err: RustCallStatus
     ): Unit
 
-    fun rocketscience_3a9e_Rocket_new(name: RustBuffer.ByValue
-    , uniffi_out_err: Structure.ByReference
-    ): Long
+    fun rocketscience_b310_Rocket_new(name: RustBuffer.ByValue,
+    _uniffi_out_err: RustCallStatus
+    ): Pointer
 
-    fun rocketscience_3a9e_Rocket_show(handle: Long
-    , uniffi_out_err: Structure.ByReference
+    fun rocketscience_b310_Rocket_show(ptr: Pointer,
+    _uniffi_out_err: RustCallStatus
     ): RustBuffer.ByValue
 
-    fun rocketscience_3a9e_Rocket_launch(handle: Long
-    , uniffi_out_err: Structure.ByReference
+    fun rocketscience_b310_Rocket_launch(ptr: Pointer,
+    _uniffi_out_err: RustCallStatus
     ): Byte
 
-    fun rocketscience_3a9e_Rocket_add(handle: Long,part: RustBuffer.ByValue
-    , uniffi_out_err: Structure.ByReference
+    fun rocketscience_b310_Rocket_add(ptr: Pointer,part: RustBuffer.ByValue,
+    _uniffi_out_err: RustCallStatus
     ): Unit
 
-    fun rocketscience_3a9e_Rocket_lock_steering(handle: Long,direction: RustBuffer.ByValue
-    , uniffi_out_err: Structure.ByReference
+    fun rocketscience_b310_Rocket_lock_steering(ptr: Pointer,direction: RustBuffer.ByValue,
+    _uniffi_out_err: RustCallStatus
     ): Unit
 
-    fun ffi_rocketscience_3a9e_rustbuffer_alloc(size: Int
-    , uniffi_out_err: Structure.ByReference
+    fun ffi_rocketscience_b310_rustbuffer_alloc(size: Int,
+    _uniffi_out_err: RustCallStatus
     ): RustBuffer.ByValue
 
-    fun ffi_rocketscience_3a9e_rustbuffer_from_bytes(bytes: ForeignBytes.ByValue
-    , uniffi_out_err: Structure.ByReference
+    fun ffi_rocketscience_b310_rustbuffer_from_bytes(bytes: ForeignBytes.ByValue,
+    _uniffi_out_err: RustCallStatus
     ): RustBuffer.ByValue
 
-    fun ffi_rocketscience_3a9e_rustbuffer_free(buf: RustBuffer.ByValue
-    , uniffi_out_err: Structure.ByReference
+    fun ffi_rocketscience_b310_rustbuffer_free(buf: RustBuffer.ByValue,
+    _uniffi_out_err: RustCallStatus
     ): Unit
 
-    fun ffi_rocketscience_3a9e_rustbuffer_reserve(buf: RustBuffer.ByValue,additional: Int
-    , uniffi_out_err: Structure.ByReference
+    fun ffi_rocketscience_b310_rustbuffer_reserve(buf: RustBuffer.ByValue,additional: Int,
+    _uniffi_out_err: RustCallStatus
     ): RustBuffer.ByValue
-
-    fun ffi_rocketscience_3a9e_string_free(cstr: Pointer
-    , uniffi_out_err: Structure.ByReference
-    ): Unit
 
     
 }
 
-// A handful of classes and functions to support the generated data structures.
-// This would be a good candidate for isolating in its own ffi-support lib.
+// Public interface members begin here.
 
-
-abstract class FFIObject(
-    private val handle: AtomicLong
-) {
-    open fun destroy() {
-        this.handle.set(0L)
-    }
-
-    internal inline fun <R> callWithHandle(block: (handle: Long) -> R) =
-        this.handle.get().let { handle -> 
-            if (handle != 0L) {
-                block(handle)
-            } else {
-                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
-            }
+// Interface implemented by anything that can contain an object reference.
+//
+// Such types expose a `destroy()` method that must be called to cleanly
+// dispose of the contained objects. Failure to call this method may result
+// in memory leaks.
+//
+// The easiest way to ensure this method is called is to use the `.use`
+// helper method to execute a block and destroy the object at the end.
+interface Disposable {
+    fun destroy()
+    companion object {
+        fun destroy(vararg args: Any?) {
+            args.filterIsInstance<Disposable>()
+                .forEach(Disposable::destroy)
         }
+    }
 }
 
-inline fun <T : FFIObject, R> T.use(block: (T) -> R) =
+inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
     try {
         block(this)
     } finally {
         try {
-            this.destroy()
+            // N.B. our implementation is on the nullable type `Disposable?`.
+            this?.destroy()
         } catch (e: Throwable) {
             // swallow
         }
     }
 
+// The base class for all UniFFI Object types.
+//
+// This class provides core operations for working with the Rust `Arc<T>` pointer to
+// the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// the Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each `FFIObject` instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an `FFIObject` is no longer needed, its pointer should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an `FFIObject` instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so will
+//     leak the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each `FFIObject` an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// In the future we may be able to replace some of this with automatic finalization logic, such as using
+// the new "Cleaner" functionaility in Java 9. The above scheme has been designed to work even if `destroy` is
+// invoked by garbage-collection machinery rather than by calling code (which by the way, it's apparently also
+// possible for the JVM to finalize an object while there is an in-flight call to one of its methods [1],
+// so there would still be some complexity here).
+//
+// Sigh...all of this for want of a robust finalization mechanism.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+abstract class FFIObject(
+    protected val pointer: Pointer
+): Disposable, AutoCloseable {
 
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
 
+    open protected fun freeRustArcPtr() {
+        // To be overridden in subclasses.
+    }
 
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                this.freeRustArcPtr()
+            }
+        }
+    }
 
-// Public interface members begin here.
-// Public facing enums
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
 
-
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.pointer)
+        } finally {
+            // This decrement aways matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                this.freeRustArcPtr()
+            }
+        }
+    }
+}
 
 
 
 enum class Direction {
     UP,DOWN;
+}
 
-    companion object {
-        internal fun lift(rbuf: RustBuffer.ByValue): Direction {
-            return liftFromRustBuffer(rbuf) { buf -> Direction.read(buf) }
-        }
-
-        internal fun read(buf: ByteBuffer) =
-            try { values()[buf.getInt() - 1] }
-            catch (e: IndexOutOfBoundsException) {
-                throw RuntimeException("invalid enum value, something is very wrong!!", e)
-            }
+internal object FfiConverterTypeDirection {
+    fun lift(rbuf: RustBuffer.ByValue): Direction {
+        return liftFromRustBuffer(rbuf) { buf -> read(buf) }
     }
 
-    internal fun lower(): RustBuffer.ByValue {
-        return lowerIntoRustBuffer(this, {v, buf -> v.write(buf)})
+    fun read(buf: ByteBuffer) = try {
+        Direction.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
     }
 
-    internal fun write(buf: RustBufferBuilder) {
-        buf.putInt(this.ordinal + 1)
+    fun lower(value: Direction): RustBuffer.ByValue {
+        return lowerIntoRustBuffer(value, {v, buf -> write(v, buf)})
+    }
+
+    fun write(value: Direction, buf: RustBufferBuilder) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
-// Error definitions
-interface RustErrorReference : Structure.ByReference {
-    fun isFailure(): Boolean
-    fun<E: Exception> intoException(): E
-    fun ensureConsumed()
-    fun getMessage(): String?
-    fun consumeErrorMessage(): String
-}
-
-@Structure.FieldOrder("code", "message")
-internal open class RustError : Structure() {
-   open class ByReference: RustError(), RustErrorReference
-
-    @JvmField var code: Int = 0
-    @JvmField var message: Pointer? = null
-
-    /**
-     * Does this represent success?
-     */
-    fun isSuccess(): Boolean {
-        return code == 0
-    }
-
-    /**
-     * Does this represent failure?
-     */
-    fun isFailure(): Boolean {
-        return code != 0
-    }
-
-    @Synchronized
-    fun ensureConsumed() {
-        if (this.message != null) {
-            rustCall(InternalError.ByReference()) { err ->
-                _UniFFILib.INSTANCE.ffi_rocketscience_3a9e_string_free(this.message!!, err)
-             }
-            this.message = null
-        }
-    }
-
-    /**
-     * Get the error message or null if there is none.
-     */
-    fun getMessage(): String? {
-        return this.message?.getString(0, "utf8")
-    }
-
-    /**
-     * Get and consume the error message, or null if there is none.
-     */
-    @Synchronized
-    fun consumeErrorMessage(): String {
-        val result = this.getMessage()
-        if (this.message != null) {
-            this.ensureConsumed()
-        }
-        if (result == null) {
-            throw NullPointerException("consumeErrorMessage called with null message!")
-        }
-        return result
-    }
-
-    @Suppress("ReturnCount", "TooGenericExceptionThrown")
-    open fun<E: Exception> intoException(): E {
-        if (!isFailure()) {
-            // It's probably a bad idea to throw here! We're probably leaking something if this is
-            // ever hit! (But we shouldn't ever hit it?)
-            throw RuntimeException("[Bug] intoException called on non-failure!")
-        }
-        this.consumeErrorMessage()
-        throw RuntimeException("Generic errors are not implemented yet")
-    }
-}
-
-internal open class InternalError : RustError() {
-    class ByReference: InternalError(), RustErrorReference
-
-    @Suppress("ReturnCount", "TooGenericExceptionThrown", "UNCHECKED_CAST")
-    override fun<E: Exception> intoException(): E {
-        if (!isFailure()) {
-            // It's probably a bad idea to throw here! We're probably leaking something if this is
-            // ever hit! (But we shouldn't ever hit it?)
-            throw RuntimeException("[Bug] intoException called on non-failure!")
-        }
-        val message = this.consumeErrorMessage()
-        return InternalException(message) as E
-    }
-}
-
-class InternalException(message: String) : Exception(message)
-internal open class LaunchError : RustError() {
-    class ByReference: LaunchError(), RustErrorReference
-
-    @Suppress("ReturnCount", "TooGenericExceptionThrown", "UNCHECKED_CAST")
-    override fun<E: Exception> intoException(): E {
-        if (!isFailure()) {
-            // It's probably a bad idea to throw here! We're probably leaking something if this is
-            // ever hit! (But we shouldn't ever hit it?)
-            throw RuntimeException("[Bug] intoException called on non-failure!")
-        }
-        val message = this.consumeErrorMessage()
-        when (code) {
-            1 -> return LaunchErrorException.RocketLaunch(message) as E
-            else -> throw RuntimeException("Invalid error received: $code, $message")
-        }
-    }
-}
-
-open class LaunchErrorException(message: String) : Exception(message) {
-    class RocketLaunch(msg: String) : LaunchErrorException(msg)
-    
-}
-
-
-
-// Helpers for calling Rust with errors:
-// In practice we usually need to be synchronized to call this safely, so it doesn't
-// synchronize itself
-private inline fun <U, E: RustErrorReference> nullableRustCall(callback: (E) -> U?, err: E): U? {
-    try {
-        val ret = callback(err)
-        if (err.isFailure()) {
-            throw err.intoException()
-        }
-        return ret
-    } finally {
-        // This only matters if `callback` throws (or does a non-local return, which
-        // we currently don't do)
-        err.ensureConsumed()
-    }
-}
-
-private inline fun <U, E: RustErrorReference> rustCall(err: E, callback: (E) -> U?): U {
-    return nullableRustCall(callback, err)!!
-}
-
-// Public facing records
-data class Part (
-    val name: String, 
-    val cost: ULong, 
-    val weight: ULong 
-) {
-    companion object {
-        // XXX TODO: put this in a superclass maybe?
-        internal fun lift(rbuf: RustBuffer.ByValue): Part {
-            return liftFromRustBuffer(rbuf) { buf -> Part.read(buf) }
-        }
-
-        internal fun read(buf: ByteBuffer): Part {
-            return Part(
-            String.read(buf),
-            ULong.read(buf),
-            ULong.read(buf)
-            )
-        }
-    }
-
-    internal fun lower(): RustBuffer.ByValue {
-        return lowerIntoRustBuffer(this, {v, buf -> v.write(buf)})
-    }
-
-    internal fun write(buf: RustBufferBuilder) {
-            this.name.write(buf)
-            this.cost.write(buf)
-            this.weight.write(buf)
-    }
-}
-
-
-// Namespace functions
-
-
-// Objects
 
 public interface RocketInterface {
+    
     fun show(): String
+    
+    @Throws(LaunchException::class)
     fun launch(): Boolean
+    
     fun add(part: Part )
+    
     fun lockSteering(direction: Direction )
     
 }
 
 class Rocket(
-    handle: Long
-) : FFIObject(AtomicLong(handle)), RocketInterface {
+    pointer: Pointer
+) : FFIObject(pointer), RocketInterface {
     constructor(name: String ) :
-        this(rustCall(
-    InternalError.ByReference()
-) { err ->
-    _UniFFILib.INSTANCE.rocketscience_3a9e_Rocket_new(name.lower() ,err)
+        this(
+    rustCall() { _status ->
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_new(FfiConverterString.lower(name) , _status)
 })
 
     /**
      * Disconnect the object from the underlying Rust object.
-     * 
-     * It can be called more than once, but once called, interacting with the object 
+     *
+     * It can be called more than once, but once called, interacting with the object
      * causes an `IllegalStateException`.
-     * 
+     *
      * Clients **must** call this method once done with the object, or cause a memory leak.
      */
-    override fun destroy() {
-        try {
-            callWithHandle {
-                super.destroy() // poison the handle so no-one else can use it before we tell rust.
-                rustCall(InternalError.ByReference()) { err ->
-                    _UniFFILib.INSTANCE.ffi_rocketscience_3a9e_Rocket_object_free(it, err)
-                }
-            }
-        } catch (e: IllegalStateException) {
-            // The user called this more than once. Better than less than once.
+    override protected fun freeRustArcPtr() {
+        rustCall() { status ->
+            _UniFFILib.INSTANCE.ffi_rocketscience_b310_Rocket_object_free(this.pointer, status)
         }
     }
 
     override fun show(): String =
-        callWithHandle {
-rustCall(
-    InternalError.ByReference()
-) { err ->
-    _UniFFILib.INSTANCE.rocketscience_3a9e_Rocket_show(it,  err)
+        callWithPointer {
+    rustCall() { _status ->
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_show(it,   _status)
 }
         }.let {
-            String.lift(it)
+            FfiConverterString.lift(it)
         }
     
-    override fun launch(): Boolean =
-        callWithHandle {
-rustCall(
-    LaunchError.ByReference()
-) { err ->
-    _UniFFILib.INSTANCE.rocketscience_3a9e_Rocket_launch(it,  err)
+    
+    @Throws(LaunchException::class)override fun launch(): Boolean =
+        callWithPointer {
+    rustCallWithError(LaunchException) { _status ->
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_launch(it,   _status)
 }
         }.let {
-            Boolean.lift(it)
+            FfiConverterBoolean.lift(it)
         }
     
     override fun add(part: Part ) =
-        callWithHandle {
-rustCall(
-    InternalError.ByReference()
-) { err ->
-    _UniFFILib.INSTANCE.rocketscience_3a9e_Rocket_add(it, part.lower() , err)
+        callWithPointer {
+    rustCall() { _status ->
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_add(it, FfiConverterTypePart.lower(part) ,  _status)
 }
         }
     
     override fun lockSteering(direction: Direction ) =
-        callWithHandle {
-rustCall(
-    InternalError.ByReference()
-) { err ->
-    _UniFFILib.INSTANCE.rocketscience_3a9e_Rocket_lock_steering(it, direction.lower() , err)
+        callWithPointer {
+    rustCall() { _status ->
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_lock_steering(it, FfiConverterTypeDirection.lower(direction) ,  _status)
 }
         }
     
     
 
     
+    
+}
+
+internal object FfiConverterTypeRocket {
+    fun lower(value: Rocket): Pointer = value.callWithPointer { it }
+
+    fun write(value: Rocket, buf: RustBufferBuilder) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
+    }
+
+    fun lift(ptr: Pointer): Rocket {
+        return Rocket(ptr)
+    }
+
+    fun read(buf: ByteBuffer): Rocket {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
+    }
 }
 
 
-// Callback Interfaces
+data class Part (
+    var name: String, 
+    var cost: ULong, 
+    var weight: ULong 
+)  {
+    
+    
+}
 
+internal object FfiConverterTypePart {
+    fun lift(rbuf: RustBuffer.ByValue): Part {
+        return liftFromRustBuffer(rbuf) { buf -> read(buf) }
+    }
+
+    fun read(buf: ByteBuffer): Part {
+        return Part(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    fun lower(value: Part): RustBuffer.ByValue {
+        return lowerIntoRustBuffer(value, {v, buf -> write(v, buf)})
+    }
+
+    fun write(value: Part, buf: RustBufferBuilder) {
+            FfiConverterString.write(value.name, buf)
+        
+            FfiConverterULong.write(value.cost, buf)
+        
+            FfiConverterULong.write(value.weight, buf)
+        
+    }
+}
+
+sealed class LaunchException(message: String): Exception(message)  {
+        // Each variant is a nested class
+        // Flat enums carries a string error message, so no special implementation is necessary.
+        class RocketLaunch(message: String) : LaunchException(message)
+        
+
+    companion object ErrorHandler : CallStatusErrorHandler<LaunchException> {
+        override fun lift(error_buf: RustBuffer.ByValue): LaunchException = FfiConverterTypeLaunchError.lift(error_buf)
+    }
+}
+
+internal object FfiConverterTypeLaunchError {
+    fun lift(error_buf: RustBuffer.ByValue): LaunchException {
+        return liftFromRustBuffer(error_buf) { error_buf -> read(error_buf) }
+    }
+
+    fun read(error_buf: ByteBuffer): LaunchException {
+        
+            return when(error_buf.getInt()) {
+            1 -> LaunchException.RocketLaunch(FfiConverterString.read(error_buf))
+            else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+        }
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun lower(value: LaunchException): RustBuffer.ByValue {
+        throw RuntimeException("Lowering Errors is not supported")
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun write(value: LaunchException, buf: RustBufferBuilder) {
+        throw RuntimeException("Writing Errors is not supported")
+    }
+
+}
+internal object FfiConverterULong {
+    fun lift(v: Long): ULong {
+        return v.toULong()
+    }
+
+    fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
+
+    fun lower(v: ULong): Long {
+        return v.toLong()
+    }
+
+    fun write(v: ULong, buf: RustBufferBuilder) {
+        buf.putLong(v.toLong())
+    }
+}
+internal object FfiConverterBoolean {
+    fun lift(v: Byte): Boolean {
+        return v.toInt() != 0
+    }
+
+    fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
+
+    fun lower(v: Boolean): Byte {
+        return if (v) 1.toByte() else 0.toByte()
+    }
+
+    fun write(v: Boolean, buf: RustBufferBuilder) {
+        buf.putByte(lower(v))
+    }
+}
+internal object FfiConverterString {
+    fun lift(rbuf: RustBuffer.ByValue): String {
+        try {
+            val byteArr = ByteArray(rbuf.len)
+            rbuf.asByteBuffer()!!.get(byteArr)
+            return byteArr.toString(Charsets.UTF_8)
+        } finally {
+            RustBuffer.free(rbuf)
+        }
+    }
+
+    fun read(buf: ByteBuffer): String {
+        val len = buf.getInt()
+        val byteArr = ByteArray(len)
+        buf.get(byteArr)
+        return byteArr.toString(Charsets.UTF_8)
+    }
+
+    fun lower(value: String): RustBuffer.ByValue {
+        val byteArr = value.toByteArray(Charsets.UTF_8)
+        // Ideally we'd pass these bytes to `ffi_bytebuffer_from_bytes`, but doing so would require us
+        // to copy them into a JNA `Memory`. So we might as well directly copy them into a `RustBuffer`.
+        val rbuf = RustBuffer.alloc(byteArr.size)
+        rbuf.asByteBuffer()!!.put(byteArr)
+        return rbuf
+    }
+
+    fun write(value: String, buf: RustBufferBuilder) {
+        val byteArr = value.toByteArray(Charsets.UTF_8)
+        buf.putInt(byteArr.size)
+        buf.put(byteArr)
+    }
+}
+// Helper code for Rocket class is found in ObjectTemplate.kt
+// Helper code for Part record is found in RecordTemplate.kt
+// Helper code for Direction enum is found in EnumTemplate.kt
+// Helper code for LaunchException error is found in ErrorTemplate.kt
 
