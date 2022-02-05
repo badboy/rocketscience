@@ -1,26 +1,56 @@
+use std::sync::RwLock;
+
 #[derive(Debug, thiserror::Error)]
-enum LaunchError {
+pub enum LaunchError {
     #[error("Failed to launch rocket")]
     RocketLaunch,
 }
 
 /// Which direction to point to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Direction {
+pub enum Direction {
     Up,
     Down,
 }
 
 /// A vessel consists of several parts,
 /// such as the command pod, tanks or the engine.
-struct Part {
+pub struct Part {
     name: String,
     cost: u64,
     weight: u64,
 }
 
 /// A rocket we can launch into orbit.
-struct Rocket {
+struct Rocket(RwLock<Inner>);
+
+impl Rocket {
+    fn new(name: String) -> Self {
+        Self(RwLock::new(Inner::new(name)))
+    }
+
+    fn add(&self, part: Part) {
+        let mut rocket = self.0.write().unwrap();
+        rocket.add(part)
+    }
+
+    fn lock_steering(&self, dir: Direction) {
+        let mut rocket = self.0.write().unwrap();
+        rocket.lock_steering(dir);
+    }
+
+    fn launch(&self) -> Result<bool> {
+        let rocket = self.0.read().unwrap();
+        rocket.launch()
+    }
+
+    fn show(&self) -> String {
+        let rocket = self.0.read().unwrap();
+        rocket.show()
+    }
+}
+
+struct Inner {
     name: String,
     parts: Vec<Part>,
     total_cost: u64,
@@ -28,10 +58,10 @@ struct Rocket {
     steering: Option<Direction>,
 }
 
-impl Rocket {
+impl Inner {
     /// Construct a new named rocket.
     fn new(name: String) -> Self {
-        Rocket {
+        Inner {
             name,
             parts: vec![],
             total_cost: 0,
