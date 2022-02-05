@@ -46,7 +46,7 @@ cargo xtask generate
 ## License
 
 MIT. See [LICENSE](LICENSE).  
-Copyright (c) 2021 Jan-Erik Rediger <janerik@fnordig.de>
+Copyright (c) 2021-2022 Jan-Erik Rediger <janerik@fnordig.de>
 
 [uniffi]: https://github.com/mozilla/uniffi-rs
 [`uniffi_bindgen`]: https://crates.io/crates/uniffi_bindgen
