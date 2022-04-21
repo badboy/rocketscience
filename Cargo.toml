@@ -12,7 +12,7 @@ name = "rocketscience"
 
 [dependencies]
 uniffi_macros = "0.17.0"
-uniffi = "0.17.0"
+uniffi = { version = "0.17.0", features = ["builtin-bindgen"] }
 thiserror = "1.0"
 uniffi_build = "0.17.0"
 

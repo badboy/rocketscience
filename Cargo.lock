@@ -417,6 +417,7 @@ dependencies = [
  "log",
  "paste",
  "static_assertions",
+ "uniffi_bindgen",
 ]
 
 [[package]]
