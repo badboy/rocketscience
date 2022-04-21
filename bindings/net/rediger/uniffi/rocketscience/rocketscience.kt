@@ -27,7 +27,6 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-// The Rust Buffer and 3 templated methods (alloc, free, reserve).
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
 // pointer to the underlying data.
@@ -52,10 +51,6 @@ open class RustBuffer : Structure() {
 
         internal fun free(buf: RustBuffer.ByValue) = rustCall() { status ->
             _UniFFILib.INSTANCE.ffi_rocketscience_b310_rustbuffer_free(buf, status)
-        }
-
-        internal fun reserve(buf: RustBuffer.ByValue, additional: Int) = rustCall() { status ->
-            _UniFFILib.INSTANCE.ffi_rocketscience_b310_rustbuffer_reserve(buf, additional, status)
         }
     }
 
@@ -98,134 +93,77 @@ open class ForeignBytes : Structure() {
 
     class ByValue : ForeignBytes(), Structure.ByValue
 }
-
-
-// A helper for structured writing of data into a `RustBuffer`.
-// This is very similar to `java.nio.ByteBuffer` but it knows how to grow
-// the underlying `RustBuffer` on demand.
+// The FfiConverter interface handles converter types to and from the FFI
 //
-// TODO: we should benchmark writing things into a `RustBuffer` versus building
-// up a bytearray and then copying it across.
+// All implementing objects should be public to support external types.  When a
+// type is external we need to import it's FfiConverter.
+public interface FfiConverter<KotlinType, FfiType> {
+    // Convert an FFI type to a Kotlin type
+    fun lift(value: FfiType): KotlinType
 
-class RustBufferBuilder() {
-    var rbuf = RustBuffer.ByValue()
-    var bbuf: ByteBuffer? = null
+    // Convert an Kotlin type to an FFI type
+    fun lower(value: KotlinType): FfiType
 
-    init {
-        val rbuf = RustBuffer.alloc(16) // Totally arbitrary initial size
-        rbuf.writeField("len", 0)
-        this.setRustBuffer(rbuf)
-    }
+    // Read a Kotlin type from a `ByteBuffer`
+    fun read(buf: ByteBuffer): KotlinType
 
-    internal fun setRustBuffer(rbuf: RustBuffer.ByValue) {
-        this.rbuf = rbuf
-        this.bbuf = this.rbuf.data?.getByteBuffer(0, this.rbuf.capacity.toLong())?.also {
-            it.order(ByteOrder.BIG_ENDIAN)
-            it.position(rbuf.len)
+    // Calculate bytes to allocate when creating a `RustBuffer`
+    //
+    // This must return at least as many bytes as the write() function will
+    // write. It can return more bytes than needed, for example when writing
+    // Strings we can't know the exact bytes needed until we the UTF-8
+    // encoding, so we pessimistically allocate the largest size possible (3
+    // bytes per codepoint).  Allocating extra bytes is not really a big deal
+    // because the `RustBuffer` is short-lived.
+    fun allocationSize(value: KotlinType): Int
+
+    // Write a Kotlin type to a `ByteBuffer`
+    fun write(value: KotlinType, buf: ByteBuffer)
+
+    // Lower a value into a `RustBuffer`
+    //
+    // This method lowers a value into a `RustBuffer` rather than the normal
+    // FfiType.  It's used by the callback interface code.  Callback interface
+    // returns are always serialized into a `RustBuffer` regardless of their
+    // normal FFI type.
+    fun lowerIntoRustBuffer(value: KotlinType): RustBuffer.ByValue {
+        val rbuf = RustBuffer.alloc(allocationSize(value))
+        try {
+            val bbuf = rbuf.data!!.getByteBuffer(0, rbuf.capacity.toLong()).also {
+                it.order(ByteOrder.BIG_ENDIAN)
+            }
+            write(value, bbuf)
+            rbuf.writeField("len", bbuf.position())
+            return rbuf
+        } catch (e: Throwable) {
+            RustBuffer.free(rbuf)
+            throw e
         }
     }
 
-    fun finalize() : RustBuffer.ByValue {
-        val rbuf = this.rbuf
-        // Ensure that the JVM-level field is written through to native memory
-        // before turning the buffer, in case its recipient uses it in a context
-        // JNA doesn't apply its automatic synchronization logic.
-        rbuf.writeField("len", this.bbuf!!.position())
-        this.setRustBuffer(RustBuffer.ByValue())
-        return rbuf
-    }
-
-    fun discard() {
-        if(this.rbuf.data != null) {
-            // Free the current `RustBuffer`
-            RustBuffer.free(this.rbuf)
-            // Replace it with an empty RustBuffer.
-            this.setRustBuffer(RustBuffer.ByValue())
-        }
-    }
-
-    internal fun reserve(size: Int, write: (ByteBuffer) -> Unit) {
-        // TODO: this will perform two checks to ensure we're not overflowing the buffer:
-        // one here where we check if it needs to grow, and another when we call a write
-        // method on the ByteBuffer. It might be cheaper to use exception-driven control-flow
-        // here, trying the write and growing if it throws a `BufferOverflowException`.
-        // Benchmarking needed.
-        if (this.bbuf!!.position() + size > this.rbuf.capacity) {
-            rbuf.writeField("len", this.bbuf!!.position())
-            this.setRustBuffer(RustBuffer.reserve(this.rbuf, size))
-        }
-        write(this.bbuf!!)
-    }
-
-    fun putByte(v: Byte) {
-        this.reserve(1) { bbuf ->
-            bbuf.put(v)
-        }
-    }
-
-    fun putShort(v: Short) {
-        this.reserve(2) { bbuf ->
-            bbuf.putShort(v)
-        }
-    }
-
-    fun putInt(v: Int) {
-        this.reserve(4) { bbuf ->
-            bbuf.putInt(v)
-        }
-    }
-
-    fun putLong(v: Long) {
-        this.reserve(8) { bbuf ->
-            bbuf.putLong(v)
-        }
-    }
-
-    fun putFloat(v: Float) {
-        this.reserve(4) { bbuf ->
-            bbuf.putFloat(v)
-        }
-    }
-
-    fun putDouble(v: Double) {
-        this.reserve(8) { bbuf ->
-            bbuf.putDouble(v)
-        }
-    }
-
-    fun put(v: ByteArray) {
-        this.reserve(v.size) { bbuf ->
-            bbuf.put(v)
+    // Lift a value from a `RustBuffer`.
+    //
+    // This here mostly because of the symmetry with `lowerIntoRustBuffer()`.
+    // It's currently only used by the `FfiConverterRustBuffer` class below.
+    fun liftFromRustBuffer(rbuf: RustBuffer.ByValue): KotlinType {
+        val byteBuf = rbuf.asByteBuffer()!!
+        try {
+           val item = read(byteBuf)
+           if (byteBuf.hasRemaining()) {
+               throw RuntimeException("junk remaining in buffer after lifting, something is very wrong!!")
+           }
+           return item
+        } finally {
+            RustBuffer.free(rbuf)
         }
     }
 }
 
-// Helpers for reading primitive data types from a bytebuffer.
-internal fun<T> liftFromRustBuffer(rbuf: RustBuffer.ByValue, readItem: (ByteBuffer) -> T): T {
-    val buf = rbuf.asByteBuffer()!!
-    try {
-       val item = readItem(buf)
-       if (buf.hasRemaining()) {
-           throw RuntimeException("junk remaining in buffer after lifting, something is very wrong!!")
-       }
-       return item
-    } finally {
-        RustBuffer.free(rbuf)
-    }
+// FfiConverter that uses `RustBuffer` as the FfiType
+public interface FfiConverterRustBuffer<KotlinType>: FfiConverter<KotlinType, RustBuffer.ByValue> {
+    override fun lift(value: RustBuffer.ByValue) = liftFromRustBuffer(value)
+    override fun lower(value: KotlinType) = lowerIntoRustBuffer(value)
 }
-
-internal fun<T> lowerIntoRustBuffer(v: T, writeItem: (T, RustBufferBuilder) -> Unit): RustBuffer.ByValue {
-    // TODO: maybe we can calculate some sort of initial size hint?
-    val buf = RustBufferBuilder()
-    try {
-        writeItem(v, buf)
-        return buf.finalize()
-    } catch (e: Throwable) {
-        buf.discard()
-        throw e
-    }
-}
-
 // A handful of classes and functions to support the generated data structures.
 // This would be a good candidate for isolating in its own ffi-support lib.
 // Error runtime.
@@ -317,7 +255,6 @@ internal interface _UniFFILib : Library {
     companion object {
         internal val INSTANCE: _UniFFILib by lazy {
             loadIndirect<_UniFFILib>(componentName = "rocketscience")
-            
             
         }
     }
@@ -535,22 +472,16 @@ enum class Direction {
     UP,DOWN;
 }
 
-internal object FfiConverterTypeDirection {
-    fun lift(rbuf: RustBuffer.ByValue): Direction {
-        return liftFromRustBuffer(rbuf) { buf -> read(buf) }
-    }
-
-    fun read(buf: ByteBuffer) = try {
+public object FfiConverterTypeDirection: FfiConverterRustBuffer<Direction> {
+    override fun read(buf: ByteBuffer) = try {
         Direction.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
         throw RuntimeException("invalid enum value, something is very wrong!!", e)
     }
 
-    fun lower(value: Direction): RustBuffer.ByValue {
-        return lowerIntoRustBuffer(value, {v, buf -> write(v, buf)})
-    }
+    override fun allocationSize(value: Direction) = 4
 
-    fun write(value: Direction, buf: RustBufferBuilder) {
+    override fun write(value: Direction, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -563,19 +494,19 @@ public interface RocketInterface {
     @Throws(LaunchException::class)
     fun launch(): Boolean
     
-    fun add(part: Part )
+    fun add(part: Part)
     
-    fun lockSteering(direction: Direction )
+    fun lockSteering(direction: Direction)
     
 }
 
 class Rocket(
     pointer: Pointer
 ) : FFIObject(pointer), RocketInterface {
-    constructor(name: String ) :
+    constructor(name: String) :
         this(
     rustCall() { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_new(FfiConverterString.lower(name) , _status)
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_new(FfiConverterString.lower(name), _status)
 })
 
     /**
@@ -595,59 +526,58 @@ class Rocket(
     override fun show(): String =
         callWithPointer {
     rustCall() { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_show(it,   _status)
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_show(it,  _status)
 }
         }.let {
             FfiConverterString.lift(it)
         }
     
-    
     @Throws(LaunchException::class)override fun launch(): Boolean =
         callWithPointer {
     rustCallWithError(LaunchException) { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_launch(it,   _status)
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_launch(it,  _status)
 }
         }.let {
             FfiConverterBoolean.lift(it)
         }
-    
-    override fun add(part: Part ) =
+    override fun add(part: Part) =
         callWithPointer {
     rustCall() { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_add(it, FfiConverterTypePart.lower(part) ,  _status)
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_add(it, FfiConverterTypePart.lower(part),  _status)
 }
         }
     
-    override fun lockSteering(direction: Direction ) =
+    override fun lockSteering(direction: Direction) =
         callWithPointer {
     rustCall() { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_lock_steering(it, FfiConverterTypeDirection.lower(direction) ,  _status)
+    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_lock_steering(it, FfiConverterTypeDirection.lower(direction),  _status)
 }
         }
     
     
 
     
-    
 }
 
-internal object FfiConverterTypeRocket {
-    fun lower(value: Rocket): Pointer = value.callWithPointer { it }
+public object FfiConverterTypeRocket: FfiConverter<Rocket, Pointer> {
+    override fun lower(value: Rocket): Pointer = value.callWithPointer { it }
 
-    fun write(value: Rocket, buf: RustBufferBuilder) {
-        // The Rust code always expects pointers written as 8 bytes,
-        // and will fail to compile if they don't fit.
-        buf.putLong(Pointer.nativeValue(lower(value)))
+    override fun lift(value: Pointer): Rocket {
+        return Rocket(value)
     }
 
-    fun lift(ptr: Pointer): Rocket {
-        return Rocket(ptr)
-    }
-
-    fun read(buf: ByteBuffer): Rocket {
+    override fun read(buf: ByteBuffer): Rocket {
         // The Rust code always writes pointers as 8 bytes, and will
         // fail to compile if they don't fit.
         return lift(Pointer(buf.getLong()))
+    }
+
+    override fun allocationSize(value: Rocket) = 8
+
+    override fun write(value: Rocket, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
     }
 }
 
@@ -655,18 +585,13 @@ internal object FfiConverterTypeRocket {
 data class Part (
     var name: String, 
     var cost: ULong, 
-    var weight: ULong 
-)  {
-    
+    var weight: ULong
+) {
     
 }
 
-internal object FfiConverterTypePart {
-    fun lift(rbuf: RustBuffer.ByValue): Part {
-        return liftFromRustBuffer(rbuf) { buf -> read(buf) }
-    }
-
-    fun read(buf: ByteBuffer): Part {
+public object FfiConverterTypePart: FfiConverterRustBuffer<Part> {
+    override fun read(buf: ByteBuffer): Part {
         return Part(
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
@@ -674,21 +599,20 @@ internal object FfiConverterTypePart {
         )
     }
 
-    fun lower(value: Part): RustBuffer.ByValue {
-        return lowerIntoRustBuffer(value, {v, buf -> write(v, buf)})
-    }
+    override fun allocationSize(value: Part) = (
+            FfiConverterString.allocationSize(value.name) +
+            FfiConverterULong.allocationSize(value.cost) +
+            FfiConverterULong.allocationSize(value.weight)
+    )
 
-    fun write(value: Part, buf: RustBufferBuilder) {
+    override fun write(value: Part, buf: ByteBuffer) {
             FfiConverterString.write(value.name, buf)
-        
             FfiConverterULong.write(value.cost, buf)
-        
             FfiConverterULong.write(value.weight, buf)
-        
     }
 }
 
-sealed class LaunchException(message: String): Exception(message)  {
+sealed class LaunchException(message: String): Exception(message) {
         // Each variant is a nested class
         // Flat enums carries a string error message, so no special implementation is necessary.
         class RocketLaunch(message: String) : LaunchException(message)
@@ -699,83 +623,87 @@ sealed class LaunchException(message: String): Exception(message)  {
     }
 }
 
-internal object FfiConverterTypeLaunchError {
-    fun lift(error_buf: RustBuffer.ByValue): LaunchException {
-        return liftFromRustBuffer(error_buf) { error_buf -> read(error_buf) }
-    }
-
-    fun read(error_buf: ByteBuffer): LaunchException {
+public object FfiConverterTypeLaunchError : FfiConverterRustBuffer<LaunchException> {
+    override fun read(buf: ByteBuffer): LaunchException {
         
-            return when(error_buf.getInt()) {
-            1 -> LaunchException.RocketLaunch(FfiConverterString.read(error_buf))
+            return when(buf.getInt()) {
+            1 -> LaunchException.RocketLaunch(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
+        
     }
 
     @Suppress("UNUSED_PARAMETER")
-    fun lower(value: LaunchException): RustBuffer.ByValue {
-        throw RuntimeException("Lowering Errors is not supported")
+    override fun allocationSize(value: LaunchException): Int {
+        throw RuntimeException("Writing Errors is not supported")
     }
 
     @Suppress("UNUSED_PARAMETER")
-    fun write(value: LaunchException, buf: RustBufferBuilder) {
+    override fun write(value: LaunchException, buf: ByteBuffer) {
         throw RuntimeException("Writing Errors is not supported")
     }
 
 }
-internal object FfiConverterULong {
-    fun lift(v: Long): ULong {
-        return v.toULong()
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
     }
 
-    fun read(buf: ByteBuffer): ULong {
+    override fun read(buf: ByteBuffer): ULong {
         return lift(buf.getLong())
     }
 
-    fun lower(v: ULong): Long {
-        return v.toLong()
+    override fun lower(value: ULong): Long {
+        return value.toLong()
     }
 
-    fun write(v: ULong, buf: RustBufferBuilder) {
-        buf.putLong(v.toLong())
+    override fun allocationSize(value: ULong) = 8
+
+    override fun write(value: ULong, buf: ByteBuffer) {
+        buf.putLong(value.toLong())
     }
 }
-internal object FfiConverterBoolean {
-    fun lift(v: Byte): Boolean {
-        return v.toInt() != 0
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
     }
 
-    fun read(buf: ByteBuffer): Boolean {
+    override fun read(buf: ByteBuffer): Boolean {
         return lift(buf.get())
     }
 
-    fun lower(v: Boolean): Byte {
-        return if (v) 1.toByte() else 0.toByte()
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
     }
 
-    fun write(v: Boolean, buf: RustBufferBuilder) {
-        buf.putByte(lower(v))
+    override fun allocationSize(value: Boolean) = 1
+
+    override fun write(value: Boolean, buf: ByteBuffer) {
+        buf.put(lower(value))
     }
 }
-internal object FfiConverterString {
-    fun lift(rbuf: RustBuffer.ByValue): String {
+public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
+    // Note: we don't inherit from FfiConverterRustBuffer, because we use a
+    // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
+    // store our length and avoid writing it out to the buffer.
+    override fun lift(value: RustBuffer.ByValue): String {
         try {
-            val byteArr = ByteArray(rbuf.len)
-            rbuf.asByteBuffer()!!.get(byteArr)
+            val byteArr = ByteArray(value.len)
+            value.asByteBuffer()!!.get(byteArr)
             return byteArr.toString(Charsets.UTF_8)
         } finally {
-            RustBuffer.free(rbuf)
+            RustBuffer.free(value)
         }
     }
 
-    fun read(buf: ByteBuffer): String {
+    override fun read(buf: ByteBuffer): String {
         val len = buf.getInt()
         val byteArr = ByteArray(len)
         buf.get(byteArr)
         return byteArr.toString(Charsets.UTF_8)
     }
 
-    fun lower(value: String): RustBuffer.ByValue {
+    override fun lower(value: String): RustBuffer.ByValue {
         val byteArr = value.toByteArray(Charsets.UTF_8)
         // Ideally we'd pass these bytes to `ffi_bytebuffer_from_bytes`, but doing so would require us
         // to copy them into a JNA `Memory`. So we might as well directly copy them into a `RustBuffer`.
@@ -784,7 +712,16 @@ internal object FfiConverterString {
         return rbuf
     }
 
-    fun write(value: String, buf: RustBufferBuilder) {
+    // We aren't sure exactly how many bytes our string will be once it's UTF-8
+    // encoded.  Allocate 3 bytes per unicode codepoint which will always be
+    // enough.
+    override fun allocationSize(value: String): Int {
+        val sizeForLength = 4
+        val sizeForString = value.length * 3
+        return sizeForLength + sizeForString
+    }
+
+    override fun write(value: String, buf: ByteBuffer) {
         val byteArr = value.toByteArray(Charsets.UTF_8)
         buf.putInt(byteArr.size)
         buf.put(byteArr)
