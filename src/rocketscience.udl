@@ -16,8 +16,8 @@ enum Direction {
 // such as the command pod, tanks or the engine.
 dictionary Part {
     string name;
-    u64 cost;
-    u64 weight;
+    i64 cost;
+    i64 weight;
 };
 
 // A rocket we can launch into orbit.

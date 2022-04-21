@@ -17,8 +17,8 @@ pub enum Direction {
 /// such as the command pod, tanks or the engine.
 pub struct Part {
     name: String,
-    cost: u64,
-    weight: u64,
+    cost: i64,
+    weight: i64,
 }
 
 /// A rocket we can launch into orbit.
@@ -53,8 +53,8 @@ impl Rocket {
 struct Inner {
     name: String,
     parts: Vec<Part>,
-    total_cost: u64,
-    total_weight: u64,
+    total_cost: i64,
+    total_weight: i64,
     steering: Option<Direction>,
 }
 
