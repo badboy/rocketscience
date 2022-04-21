@@ -2,7 +2,7 @@
 name = "rocketscience"
 version = "0.1.0"
 authors = ["Jan-Erik Rediger <janerik@fnordig.de>"]
-edition = "2018"
+edition = "2021"
 publish = false
 license = "MIT"
 
