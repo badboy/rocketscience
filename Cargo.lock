@@ -9,16 +9,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4361135be9122e0870de935d7c439aef945b9f9ddd4199a553b5270b49c82a27"
 
 [[package]]
-name = "arrayvec"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
-
-[[package]]
 name = "askama"
-version = "0.10.5"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d298738b6e47e1034e560e5afe63aa488fea34e25ec11b855a76f0d7b8e73134"
+checksum = "fb98f10f371286b177db5eeb9a6e5396609555686a35e1d4f7b9a9c6d8af0139"
 dependencies = [
  "askama_derive",
  "askama_escape",
@@ -27,9 +21,9 @@ dependencies = [
 
 [[package]]
 name = "askama_derive"
-version = "0.10.5"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca2925c4c290382f9d2fa3d1c1b6a63fa1427099721ecca4749b154cc9c25522"
+checksum = "87bf87e6e8b47264efa9bde63d6225c6276a52e05e91bf37eaa8afd0032d6b71"
 dependencies = [
  "askama_shared",
  "proc-macro2",
@@ -44,12 +38,14 @@ checksum = "619743e34b5ba4e9703bba34deac3427c72507c7159f5fd030aea8cac0cfe341"
 
 [[package]]
 name = "askama_shared"
-version = "0.11.2"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d6083ccb191711e9c2b80b22ee24a8381a18524444914c746d4239e21d1afaf"
+checksum = "bf722b94118a07fcbc6640190f247334027685d4e218b794dbfe17c32bf38ed0"
 dependencies = [
  "askama_escape",
- "nom 6.2.1",
+ "mime",
+ "mime_guess",
+ "nom 7.1.1",
  "proc-macro2",
  "quote",
  "serde",
@@ -62,18 +58,6 @@ name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
-
-[[package]]
-name = "bitvec"
-version = "0.19.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55f93d0ef3363c364d5976646a38f04cf67cfe1d4c8d160cdea02cab2c116b33"
-dependencies = [
- "funty",
- "radium",
- "tap",
- "wyz",
-]
 
 [[package]]
 name = "bytes"
@@ -131,12 +115,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "funty"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fed34cd105917e91daa4da6b3728c47b068749d6a62c59811f06ed2ac71d9da7"
-
-[[package]]
 name = "glob"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -164,19 +142,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
-name = "lexical-core"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6607c62aa161d23d17a9072cc5da0be67cdfc89d3afb1e8d9c842bebc2525ffe"
-dependencies = [
- "arrayvec",
- "bitflags",
- "cfg-if",
- "ryu",
- "static_assertions",
-]
-
-[[package]]
 name = "log"
 version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -187,9 +152,31 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.3.4"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ee1c47aaa256ecabcaea351eae4a9b01ef39ed810004e298d2511ed284b1525"
+checksum = "308cc39be01b73d0d18f82a0e7b2a3df85245f84af96fdddc5d202d27e47b86a"
+
+[[package]]
+name = "mime"
+version = "0.3.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a60c7ce501c71e03a9c9c0d35b861413ae925bd979cc7a4e30d060069aaac8d"
+
+[[package]]
+name = "mime_guess"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4192263c238a5f0d0c6bfd21f336a313a4ce1c450542449ca191bb657b4642ef"
+dependencies = [
+ "mime",
+ "unicase",
+]
+
+[[package]]
+name = "minimal-lexical"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "nom"
@@ -203,15 +190,12 @@ dependencies = [
 
 [[package]]
 name = "nom"
-version = "6.2.1"
+version = "7.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c5c51b9083a3c620fa67a2a635d1ce7d95b897e957d6b28ff9a5da960a103a6"
+checksum = "a8903e5a29a317527874d0402f867152a3d21c908bb0b933e416c65e301d4c36"
 dependencies = [
- "bitvec",
- "funty",
- "lexical-core",
  "memchr",
- "version_check",
+ "minimal-lexical",
 ]
 
 [[package]]
@@ -246,12 +230,6 @@ checksum = "a1feb54ed693b93a84e14094943b84b7c4eae204c512b7ccb95ab0c66d278ad1"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "radium"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "941ba9d78d8e2f7ce474c015eea4d9c6d25b6a3327f9832ee29a4de27f91bbb8"
 
 [[package]]
 name = "rocketscience"
@@ -337,12 +315,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tap"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
-
-[[package]]
 name = "textwrap"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -387,6 +359,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56dee185309b50d1f11bfedef0fe6d036842e3fb77413abef29f8f8d1c5d4c1c"
 
 [[package]]
+name = "unicase"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50f37be617794602aabbeee0be4f259dc1778fabe05e2d67ee8f79326d5cb4f6"
+dependencies = [
+ "version_check",
+]
+
+[[package]]
 name = "unicode-segmentation"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -407,8 +388,7 @@ checksum = "8ccb82d61f80a663efe1f787a51b16b5a51e3314d6ac365b08639f52387b33f3"
 [[package]]
 name = "uniffi"
 version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c70e9d90cc703c4bfa842b5be1647c039578f00e3fd575f796d5acb90bae3fa"
+source = "git+https://github.com/badboy/uniffi-rs?branch=fix-swift-callback-failure#70105228267d46ae0bf530d65fa2a8c36abe0e45"
 dependencies = [
  "anyhow",
  "bytes",
@@ -423,8 +403,7 @@ dependencies = [
 [[package]]
 name = "uniffi_bindgen"
 version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f70a820a6a598cd6026e097a1a1520e429fb846efe4719934f816f264d3ba96a"
+source = "git+https://github.com/badboy/uniffi-rs?branch=fix-swift-callback-failure#70105228267d46ae0bf530d65fa2a8c36abe0e45"
 dependencies = [
  "anyhow",
  "askama",
@@ -440,8 +419,7 @@ dependencies = [
 [[package]]
 name = "uniffi_build"
 version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7b35d8e19c773c42176343a92ce8480443e5aa19f02deb75572acf7f8a51bbb"
+source = "git+https://github.com/badboy/uniffi-rs?branch=fix-swift-callback-failure#70105228267d46ae0bf530d65fa2a8c36abe0e45"
 dependencies = [
  "anyhow",
  "uniffi_bindgen",
@@ -450,8 +428,7 @@ dependencies = [
 [[package]]
 name = "uniffi_macros"
 version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fb8e1cc005baa085499d4802f9ffe5137f8d251b1fc75045b0767372199b21d"
+source = "git+https://github.com/badboy/uniffi-rs?branch=fix-swift-callback-failure#70105228267d46ae0bf530d65fa2a8c36abe0e45"
 dependencies = [
  "glob",
  "proc-macro2",
@@ -474,12 +451,6 @@ checksum = "610950904727748ca09682e857f0d6d6437f0ca862f32f9229edba8cec8b2635"
 dependencies = [
  "nom 5.1.2",
 ]
-
-[[package]]
-name = "wyz"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85e60b0d1b5f99db2556934e21937020776a5d31520bf169e851ac44e6420214"
 
 [[package]]
 name = "xshell"

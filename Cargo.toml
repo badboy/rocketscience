@@ -24,3 +24,9 @@ members = [
     ".",
     "xtask",
 ]
+
+[patch.crates-io]
+uniffi = { git = "https://github.com/badboy/uniffi-rs", branch = "fix-swift-callback-failure" }
+uniffi_build = { git = "https://github.com/badboy/uniffi-rs", branch = "fix-swift-callback-failure" }
+uniffi_macros = { git = "https://github.com/badboy/uniffi-rs", branch = "fix-swift-callback-failure" }
+uniffi_bindgen = { git = "https://github.com/badboy/uniffi-rs", branch = "fix-swift-callback-failure" }
