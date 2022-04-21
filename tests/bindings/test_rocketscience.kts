@@ -1,4 +1,3 @@
-import org.mozilla.uniffi.example.arithmetic.*;
 import net.rediger.uniffi.rocketscience.*
 
 val command = Part(name = "Mk1 Command Pod", cost = 600, weight = 840)
@@ -15,7 +14,7 @@ rocket.lockSteering(direction = Direction.DOWN)
 try {
     rocket.launch()
     throw RuntimeException("Should have thrown a LaunchError exception!")
-} catch(e: LaunchError) {
+} catch(e: LaunchException) {
     // It's okay!
 }
 
