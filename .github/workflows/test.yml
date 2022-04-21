@@ -36,6 +36,13 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: cargo xtask test python
 
+    - name: Test Kotlin
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        curl -o jna.jar https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.8.0/jna-5.8.0.jar
+        export CLASSPATH="$CLASSPATH:$(pwd)/jna.jar"
+        cargo xtask test kotlin
+
     - name: Test Swift
       if: matrix.os == 'macos-latest'
       run: cargo xtask test swift
