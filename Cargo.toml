@@ -1,7 +1,6 @@
 [package]
 name = "rocketscience"
 version = "0.1.0"
-authors = ["Jan-Erik Rediger <janerik@fnordig.de>"]
 edition = "2021"
 publish = false
 license = "MIT"
@@ -11,16 +10,21 @@ crate-type = ["staticlib", "cdylib", "lib"]
 name = "rocketscience"
 
 [dependencies]
-uniffi_macros = "0.17.0"
-uniffi = { version = "0.17.0", features = ["builtin-bindgen"] }
-thiserror = "1.0"
-uniffi_build = "0.17.0"
+thiserror = "1.0.44"
+uniffi = { workspace = true }
 
 [build-dependencies]
-uniffi_build = { version = "0.17.0", features = ["builtin-bindgen"] }
+uniffi = { workspace = true, features = ["build"] }
+
+[dev-dependencies]
+uniffi = { workspace = true, features = ["bindgen-tests"] }
 
 [workspace]
 members = [
     ".",
     "xtask",
+    "bindgen",
 ]
+
+[workspace.dependencies]
+uniffi = { git = "https://github.com/mozilla/uniffi-rs/" }

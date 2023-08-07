@@ -18,12 +18,17 @@ package net.rediger.uniffi.rocketscience;
 // helpers directly inline like we're doing here.
 
 import com.sun.jna.Library
+import com.sun.jna.IntegerType
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.Structure
-import com.sun.jna.ptr.ByReference
+import com.sun.jna.Callback
+import com.sun.jna.ptr.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.CharBuffer
+import java.nio.charset.CodingErrorAction
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -37,12 +42,12 @@ open class RustBuffer : Structure() {
     @JvmField var len: Int = 0
     @JvmField var data: Pointer? = null
 
-    class ByValue : RustBuffer(), Structure.ByValue
-    class ByReference : RustBuffer(), Structure.ByReference
+    class ByValue: RustBuffer(), Structure.ByValue
+    class ByReference: RustBuffer(), Structure.ByReference
 
     companion object {
         internal fun alloc(size: Int = 0) = rustCall() { status ->
-            _UniFFILib.INSTANCE.ffi_rocketscience_b310_rustbuffer_alloc(size, status).also {
+            _UniFFILib.INSTANCE.ffi_rocketscience_rustbuffer_alloc(size, status).also {
                 if(it.data == null) {
                    throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
                }
@@ -50,7 +55,7 @@ open class RustBuffer : Structure() {
         }
 
         internal fun free(buf: RustBuffer.ByValue) = rustCall() { status ->
-            _UniFFILib.INSTANCE.ffi_rocketscience_b310_rustbuffer_free(buf, status)
+            _UniFFILib.INSTANCE.ffi_rocketscience_rustbuffer_free(buf, status)
         }
     }
 
@@ -77,6 +82,19 @@ class RustBufferByReference : ByReference(16) {
         pointer.setInt(0, value.capacity)
         pointer.setInt(4, value.len)
         pointer.setPointer(8, value.data)
+    }
+
+    /**
+     * Get a `RustBuffer.ByValue` from this reference.
+     */
+    fun getValue(): RustBuffer.ByValue {
+        val pointer = getPointer()
+        val value = RustBuffer.ByValue()
+        value.writeField("capacity", pointer.getInt(0))
+        value.writeField("len", pointer.getInt(4))
+        value.writeField("data", pointer.getPointer(8))
+
+        return value
     }
 }
 
@@ -169,19 +187,21 @@ public interface FfiConverterRustBuffer<KotlinType>: FfiConverter<KotlinType, Ru
 // Error runtime.
 @Structure.FieldOrder("code", "error_buf")
 internal open class RustCallStatus : Structure() {
-    @JvmField var code: Int = 0
+    @JvmField var code: Byte = 0
     @JvmField var error_buf: RustBuffer.ByValue = RustBuffer.ByValue()
 
+    class ByValue: RustCallStatus(), Structure.ByValue
+
     fun isSuccess(): Boolean {
-        return code == 0
+        return code == 0.toByte()
     }
 
     fun isError(): Boolean {
-        return code == 1
+        return code == 1.toByte()
     }
 
     fun isPanic(): Boolean {
-        return code == 2
+        return code == 2.toByte()
     }
 }
 
@@ -200,8 +220,14 @@ interface CallStatusErrorHandler<E> {
 private inline fun <U, E: Exception> rustCallWithError(errorHandler: CallStatusErrorHandler<E>, callback: (RustCallStatus) -> U): U {
     var status = RustCallStatus();
     val return_value = callback(status)
+    checkCallStatus(errorHandler, status)
+    return return_value
+}
+
+// Check RustCallStatus and throw an error if the call wasn't successful
+private fun<E: Exception> checkCallStatus(errorHandler: CallStatusErrorHandler<E>, status: RustCallStatus) {
     if (status.isSuccess()) {
-        return return_value
+        return
     } else if (status.isError()) {
         throw errorHandler.lift(status.error_buf)
     } else if (status.isPanic()) {
@@ -231,6 +257,86 @@ private inline fun <U> rustCall(callback: (RustCallStatus) -> U): U {
     return rustCallWithError(NullCallStatusErrorHandler, callback);
 }
 
+// IntegerType that matches Rust's `usize` / C's `size_t`
+public class USize(value: Long = 0) : IntegerType(Native.SIZE_T_SIZE, value, true) {
+    // This is needed to fill in the gaps of IntegerType's implementation of Number for Kotlin.
+    override fun toByte() = toInt().toByte()
+    override fun toChar() = toInt().toChar()
+    override fun toShort() = toInt().toShort()
+
+    fun writeToBuffer(buf: ByteBuffer) {
+        // Make sure we always write usize integers using native byte-order, since they may be
+        // casted to pointer values
+        buf.order(ByteOrder.nativeOrder())
+        try {
+            when (Native.SIZE_T_SIZE) {
+                4 -> buf.putInt(toInt())
+                8 -> buf.putLong(toLong())
+                else -> throw RuntimeException("Invalid SIZE_T_SIZE: ${Native.SIZE_T_SIZE}")
+            }
+        } finally {
+            buf.order(ByteOrder.BIG_ENDIAN)
+        }
+    }
+
+    companion object {
+        val size: Int
+            get() = Native.SIZE_T_SIZE
+
+        fun readFromBuffer(buf: ByteBuffer) : USize {
+            // Make sure we always read usize integers using native byte-order, since they may be
+            // casted from pointer values
+            buf.order(ByteOrder.nativeOrder())
+            try {
+                return when (Native.SIZE_T_SIZE) {
+                    4 -> USize(buf.getInt().toLong())
+                    8 -> USize(buf.getLong())
+                    else -> throw RuntimeException("Invalid SIZE_T_SIZE: ${Native.SIZE_T_SIZE}")
+                }
+            } finally {
+                buf.order(ByteOrder.BIG_ENDIAN)
+            }
+        }
+    }
+}
+
+
+// Map handles to objects
+//
+// This is used when the Rust code expects an opaque pointer to represent some foreign object.
+// Normally we would pass a pointer to the object, but JNA doesn't support getting a pointer from an
+// object reference , nor does it support leaking a reference to Rust.
+//
+// Instead, this class maps USize values to objects so that we can pass a pointer-sized type to
+// Rust when it needs an opaque pointer.
+//
+// TODO: refactor callbacks to use this class
+internal class UniFfiHandleMap<T: Any> {
+    private val map = ConcurrentHashMap<USize, T>()
+    // Use AtomicInteger for our counter, since we may be on a 32-bit system.  4 billion possible
+    // values seems like enough. If somehow we generate 4 billion handles, then this will wrap
+    // around back to zero and we can assume the first handle generated will have been dropped by
+    // then.
+    private val counter = java.util.concurrent.atomic.AtomicInteger(0)
+
+    val size: Int
+        get() = map.size
+
+    fun insert(obj: T): USize {
+        val handle = USize(counter.getAndAdd(1).toLong())
+        map.put(handle, obj)
+        return handle
+    }
+
+    fun get(handle: USize): T? {
+        return map.get(handle)
+    }
+
+    fun remove(handle: USize) {
+        map.remove(handle)
+    }
+}
+
 // Contains loading, initialization code,
 // and the FFI Function declarations in a com.sun.jna.Library.
 @Synchronized
@@ -255,54 +361,174 @@ internal interface _UniFFILib : Library {
     companion object {
         internal val INSTANCE: _UniFFILib by lazy {
             loadIndirect<_UniFFILib>(componentName = "rocketscience")
-            
+            .also { lib: _UniFFILib ->
+                uniffiCheckContractApiVersion(lib)
+                uniffiCheckApiChecksums(lib)
+                }
         }
     }
 
-    fun ffi_rocketscience_b310_Rocket_object_free(ptr: Pointer,
-    _uniffi_out_err: RustCallStatus
+    fun uniffi_rocketscience_fn_free_rocket(`ptr`: Pointer,_uniffi_out_err: RustCallStatus,
     ): Unit
-
-    fun rocketscience_b310_Rocket_new(name: RustBuffer.ByValue,
-    _uniffi_out_err: RustCallStatus
+    fun uniffi_rocketscience_fn_constructor_rocket_new(`name`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus,
     ): Pointer
-
-    fun rocketscience_b310_Rocket_show(ptr: Pointer,
-    _uniffi_out_err: RustCallStatus
-    ): RustBuffer.ByValue
-
-    fun rocketscience_b310_Rocket_launch(ptr: Pointer,
-    _uniffi_out_err: RustCallStatus
+    fun uniffi_rocketscience_fn_method_rocket_add(`ptr`: Pointer,`part`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus,
+    ): Unit
+    fun uniffi_rocketscience_fn_method_rocket_launch(`ptr`: Pointer,_uniffi_out_err: RustCallStatus,
     ): Byte
-
-    fun rocketscience_b310_Rocket_add(ptr: Pointer,part: RustBuffer.ByValue,
-    _uniffi_out_err: RustCallStatus
+    fun uniffi_rocketscience_fn_method_rocket_lock_steering(`ptr`: Pointer,`dir`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus,
     ): Unit
-
-    fun rocketscience_b310_Rocket_lock_steering(ptr: Pointer,direction: RustBuffer.ByValue,
-    _uniffi_out_err: RustCallStatus
+    fun uniffi_rocketscience_fn_method_rocket_show(`ptr`: Pointer,_uniffi_out_err: RustCallStatus,
+    ): RustBuffer.ByValue
+    fun ffi_rocketscience_rustbuffer_alloc(`size`: Int,_uniffi_out_err: RustCallStatus,
+    ): RustBuffer.ByValue
+    fun ffi_rocketscience_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,_uniffi_out_err: RustCallStatus,
+    ): RustBuffer.ByValue
+    fun ffi_rocketscience_rustbuffer_free(`buf`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus,
     ): Unit
-
-    fun ffi_rocketscience_b310_rustbuffer_alloc(size: Int,
-    _uniffi_out_err: RustCallStatus
+    fun ffi_rocketscience_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Int,_uniffi_out_err: RustCallStatus,
     ): RustBuffer.ByValue
+    fun uniffi_rocketscience_checksum_method_rocket_add(
+    ): Short
+    fun uniffi_rocketscience_checksum_method_rocket_launch(
+    ): Short
+    fun uniffi_rocketscience_checksum_method_rocket_lock_steering(
+    ): Short
+    fun uniffi_rocketscience_checksum_method_rocket_show(
+    ): Short
+    fun uniffi_rocketscience_checksum_constructor_rocket_new(
+    ): Short
+    fun ffi_rocketscience_uniffi_contract_version(
+    ): Int
 
-    fun ffi_rocketscience_b310_rustbuffer_from_bytes(bytes: ForeignBytes.ByValue,
-    _uniffi_out_err: RustCallStatus
-    ): RustBuffer.ByValue
+}
 
-    fun ffi_rocketscience_b310_rustbuffer_free(buf: RustBuffer.ByValue,
-    _uniffi_out_err: RustCallStatus
-    ): Unit
+private fun uniffiCheckContractApiVersion(lib: _UniFFILib) {
+    // Get the bindings contract version from our ComponentInterface
+    val bindings_contract_version = 22
+    // Get the scaffolding contract version by calling the into the dylib
+    val scaffolding_contract_version = lib.ffi_rocketscience_uniffi_contract_version()
+    if (bindings_contract_version != scaffolding_contract_version) {
+        throw RuntimeException("UniFFI contract version mismatch: try cleaning and rebuilding your project")
+    }
+}
 
-    fun ffi_rocketscience_b310_rustbuffer_reserve(buf: RustBuffer.ByValue,additional: Int,
-    _uniffi_out_err: RustCallStatus
-    ): RustBuffer.ByValue
-
-    
+@Suppress("UNUSED_PARAMETER")
+private fun uniffiCheckApiChecksums(lib: _UniFFILib) {
+    if (lib.uniffi_rocketscience_checksum_method_rocket_add() != 27179.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_rocketscience_checksum_method_rocket_launch() != 23461.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_rocketscience_checksum_method_rocket_lock_steering() != 49926.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_rocketscience_checksum_method_rocket_show() != 5898.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_rocketscience_checksum_constructor_rocket_new() != 30662.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
 }
 
 // Public interface members begin here.
+
+
+public object FfiConverterLong: FfiConverter<Long, Long> {
+    override fun lift(value: Long): Long {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Long {
+        return buf.getLong()
+    }
+
+    override fun lower(value: Long): Long {
+        return value
+    }
+
+    override fun allocationSize(value: Long) = 8
+
+    override fun write(value: Long, buf: ByteBuffer) {
+        buf.putLong(value)
+    }
+}
+
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
+
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
+
+    override fun allocationSize(value: Boolean) = 1
+
+    override fun write(value: Boolean, buf: ByteBuffer) {
+        buf.put(lower(value))
+    }
+}
+
+public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
+    // Note: we don't inherit from FfiConverterRustBuffer, because we use a
+    // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
+    // store our length and avoid writing it out to the buffer.
+    override fun lift(value: RustBuffer.ByValue): String {
+        try {
+            val byteArr = ByteArray(value.len)
+            value.asByteBuffer()!!.get(byteArr)
+            return byteArr.toString(Charsets.UTF_8)
+        } finally {
+            RustBuffer.free(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): String {
+        val len = buf.getInt()
+        val byteArr = ByteArray(len)
+        buf.get(byteArr)
+        return byteArr.toString(Charsets.UTF_8)
+    }
+
+    fun toUtf8(value: String): ByteBuffer {
+        // Make sure we don't have invalid UTF-16, check for lone surrogates.
+        return Charsets.UTF_8.newEncoder().run {
+            onMalformedInput(CodingErrorAction.REPORT)
+            encode(CharBuffer.wrap(value))
+        }
+    }
+
+    override fun lower(value: String): RustBuffer.ByValue {
+        val byteBuf = toUtf8(value)
+        // Ideally we'd pass these bytes to `ffi_bytebuffer_from_bytes`, but doing so would require us
+        // to copy them into a JNA `Memory`. So we might as well directly copy them into a `RustBuffer`.
+        val rbuf = RustBuffer.alloc(byteBuf.limit())
+        rbuf.asByteBuffer()!!.put(byteBuf)
+        return rbuf
+    }
+
+    // We aren't sure exactly how many bytes our string will be once it's UTF-8
+    // encoded.  Allocate 3 bytes per UTF-16 code unit which will always be
+    // enough.
+    override fun allocationSize(value: String): Int {
+        val sizeForLength = 4
+        val sizeForString = value.length * 3
+        return sizeForLength + sizeForString
+    }
+
+    override fun write(value: String, buf: ByteBuffer) {
+        val byteBuf = toUtf8(value)
+        buf.putInt(byteBuf.limit())
+        buf.put(byteBuf)
+    }
+}
+
 
 // Interface implemented by anything that can contain an object reference.
 //
@@ -458,7 +684,7 @@ abstract class FFIObject(
         try {
             return block(this.pointer)
         } finally {
-            // This decrement aways matches the increment we performed above.
+            // This decrement always matches the increment we performed above.
             if (this.callCounter.decrementAndGet() == 0L) {
                 this.freeRustArcPtr()
             }
@@ -466,47 +692,21 @@ abstract class FFIObject(
     }
 }
 
-
-
-enum class Direction {
-    UP,DOWN;
-}
-
-public object FfiConverterTypeDirection: FfiConverterRustBuffer<Direction> {
-    override fun read(buf: ByteBuffer) = try {
-        Direction.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: Direction) = 4
-
-    override fun write(value: Direction, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
 public interface RocketInterface {
-    
-    fun show(): String
-    
-    @Throws(LaunchException::class)
-    fun launch(): Boolean
-    
-    fun add(part: Part)
-    
-    fun lockSteering(direction: Direction)
-    
+
+    fun `add`(`part`: Part)@Throws(LaunchException::class)
+    fun `launch`(): Boolean
+    fun `lockSteering`(`dir`: Direction)
+    fun `show`(): String
 }
 
 class Rocket(
     pointer: Pointer
 ) : FFIObject(pointer), RocketInterface {
-    constructor(name: String) :
+    constructor(`name`: String) :
         this(
     rustCall() { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_new(FfiConverterString.lower(name), _status)
+    _UniFFILib.INSTANCE.uniffi_rocketscience_fn_constructor_rocket_new(FfiConverterString.lower(`name`),_status)
 })
 
     /**
@@ -519,44 +719,56 @@ class Rocket(
      */
     override protected fun freeRustArcPtr() {
         rustCall() { status ->
-            _UniFFILib.INSTANCE.ffi_rocketscience_b310_Rocket_object_free(this.pointer, status)
+            _UniFFILib.INSTANCE.uniffi_rocketscience_fn_free_rocket(this.pointer, status)
         }
     }
 
-    override fun show(): String =
+    override fun `add`(`part`: Part) =
         callWithPointer {
     rustCall() { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_show(it,  _status)
+    _UniFFILib.INSTANCE.uniffi_rocketscience_fn_method_rocket_add(it,
+        FfiConverterTypePart.lower(`part`),
+        _status)
 }
-        }.let {
-            FfiConverterString.lift(it)
         }
-    
-    @Throws(LaunchException::class)override fun launch(): Boolean =
+
+
+
+    @Throws(LaunchException::class)override fun `launch`(): Boolean =
         callWithPointer {
     rustCallWithError(LaunchException) { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_launch(it,  _status)
+    _UniFFILib.INSTANCE.uniffi_rocketscience_fn_method_rocket_launch(it,
+
+        _status)
 }
         }.let {
             FfiConverterBoolean.lift(it)
         }
-    override fun add(part: Part) =
-        callWithPointer {
-    rustCall() { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_add(it, FfiConverterTypePart.lower(part),  _status)
-}
-        }
-    
-    override fun lockSteering(direction: Direction) =
-        callWithPointer {
-    rustCall() { _status ->
-    _UniFFILib.INSTANCE.rocketscience_b310_Rocket_lock_steering(it, FfiConverterTypeDirection.lower(direction),  _status)
-}
-        }
-    
-    
 
-    
+    override fun `lockSteering`(`dir`: Direction) =
+        callWithPointer {
+    rustCall() { _status ->
+    _UniFFILib.INSTANCE.uniffi_rocketscience_fn_method_rocket_lock_steering(it,
+        FfiConverterTypeDirection.lower(`dir`),
+        _status)
+}
+        }
+
+
+    override fun `show`(): String =
+        callWithPointer {
+    rustCall() { _status ->
+    _UniFFILib.INSTANCE.uniffi_rocketscience_fn_method_rocket_show(it,
+
+        _status)
+}
+        }.let {
+            FfiConverterString.lift(it)
+        }
+
+
+
+
 }
 
 public object FfiConverterTypeRocket: FfiConverter<Rocket, Pointer> {
@@ -582,153 +794,109 @@ public object FfiConverterTypeRocket: FfiConverter<Rocket, Pointer> {
 }
 
 
+
+
 data class Part (
-    var name: String, 
-    var cost: ULong, 
-    var weight: ULong
+    var `name`: String,
+    var `cost`: Long,
+    var `weight`: Long
 ) {
-    
+
 }
 
 public object FfiConverterTypePart: FfiConverterRustBuffer<Part> {
     override fun read(buf: ByteBuffer): Part {
         return Part(
             FfiConverterString.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
         )
     }
 
     override fun allocationSize(value: Part) = (
-            FfiConverterString.allocationSize(value.name) +
-            FfiConverterULong.allocationSize(value.cost) +
-            FfiConverterULong.allocationSize(value.weight)
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterLong.allocationSize(value.`cost`) +
+            FfiConverterLong.allocationSize(value.`weight`)
     )
 
     override fun write(value: Part, buf: ByteBuffer) {
-            FfiConverterString.write(value.name, buf)
-            FfiConverterULong.write(value.cost, buf)
-            FfiConverterULong.write(value.weight, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterLong.write(value.`cost`, buf)
+            FfiConverterLong.write(value.`weight`, buf)
     }
 }
 
-sealed class LaunchException(message: String): Exception(message) {
-        // Each variant is a nested class
-        // Flat enums carries a string error message, so no special implementation is necessary.
-        class RocketLaunch(message: String) : LaunchException(message)
-        
+
+
+
+enum class Direction {
+    UP,DOWN;
+}
+
+public object FfiConverterTypeDirection: FfiConverterRustBuffer<Direction> {
+    override fun read(buf: ByteBuffer) = try {
+        Direction.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: Direction) = 4
+
+    override fun write(value: Direction, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+
+sealed class LaunchException: Exception() {
+    // Each variant is a nested class
+
+    class RocketLaunch(
+        ) : LaunchException() {
+        override val message
+            get() = ""
+    }
+
 
     companion object ErrorHandler : CallStatusErrorHandler<LaunchException> {
         override fun lift(error_buf: RustBuffer.ByValue): LaunchException = FfiConverterTypeLaunchError.lift(error_buf)
     }
+
+
 }
 
 public object FfiConverterTypeLaunchError : FfiConverterRustBuffer<LaunchException> {
     override fun read(buf: ByteBuffer): LaunchException {
-        
-            return when(buf.getInt()) {
-            1 -> LaunchException.RocketLaunch(FfiConverterString.read(buf))
+
+
+        return when(buf.getInt()) {
+            1 -> LaunchException.RocketLaunch()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
-        
     }
 
-    @Suppress("UNUSED_PARAMETER")
     override fun allocationSize(value: LaunchException): Int {
-        throw RuntimeException("Writing Errors is not supported")
-    }
-
-    @Suppress("UNUSED_PARAMETER")
-    override fun write(value: LaunchException, buf: ByteBuffer) {
-        throw RuntimeException("Writing Errors is not supported")
-    }
-
-}
-public object FfiConverterULong: FfiConverter<ULong, Long> {
-    override fun lift(value: Long): ULong {
-        return value.toULong()
-    }
-
-    override fun read(buf: ByteBuffer): ULong {
-        return lift(buf.getLong())
-    }
-
-    override fun lower(value: ULong): Long {
-        return value.toLong()
-    }
-
-    override fun allocationSize(value: ULong) = 8
-
-    override fun write(value: ULong, buf: ByteBuffer) {
-        buf.putLong(value.toLong())
-    }
-}
-public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
-    override fun lift(value: Byte): Boolean {
-        return value.toInt() != 0
-    }
-
-    override fun read(buf: ByteBuffer): Boolean {
-        return lift(buf.get())
-    }
-
-    override fun lower(value: Boolean): Byte {
-        return if (value) 1.toByte() else 0.toByte()
-    }
-
-    override fun allocationSize(value: Boolean) = 1
-
-    override fun write(value: Boolean, buf: ByteBuffer) {
-        buf.put(lower(value))
-    }
-}
-public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
-    // Note: we don't inherit from FfiConverterRustBuffer, because we use a
-    // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
-    // store our length and avoid writing it out to the buffer.
-    override fun lift(value: RustBuffer.ByValue): String {
-        try {
-            val byteArr = ByteArray(value.len)
-            value.asByteBuffer()!!.get(byteArr)
-            return byteArr.toString(Charsets.UTF_8)
-        } finally {
-            RustBuffer.free(value)
+        return when(value) {
+            is LaunchException.RocketLaunch -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4
+            )
         }
     }
 
-    override fun read(buf: ByteBuffer): String {
-        val len = buf.getInt()
-        val byteArr = ByteArray(len)
-        buf.get(byteArr)
-        return byteArr.toString(Charsets.UTF_8)
+    override fun write(value: LaunchException, buf: ByteBuffer) {
+        when(value) {
+            is LaunchException.RocketLaunch -> {
+                buf.putInt(1)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
-    override fun lower(value: String): RustBuffer.ByValue {
-        val byteArr = value.toByteArray(Charsets.UTF_8)
-        // Ideally we'd pass these bytes to `ffi_bytebuffer_from_bytes`, but doing so would require us
-        // to copy them into a JNA `Memory`. So we might as well directly copy them into a `RustBuffer`.
-        val rbuf = RustBuffer.alloc(byteArr.size)
-        rbuf.asByteBuffer()!!.put(byteArr)
-        return rbuf
-    }
-
-    // We aren't sure exactly how many bytes our string will be once it's UTF-8
-    // encoded.  Allocate 3 bytes per unicode codepoint which will always be
-    // enough.
-    override fun allocationSize(value: String): Int {
-        val sizeForLength = 4
-        val sizeForString = value.length * 3
-        return sizeForLength + sizeForString
-    }
-
-    override fun write(value: String, buf: ByteBuffer) {
-        val byteArr = value.toByteArray(Charsets.UTF_8)
-        buf.putInt(byteArr.size)
-        buf.put(byteArr)
-    }
 }
-// Helper code for Rocket class is found in ObjectTemplate.kt
-// Helper code for Part record is found in RecordTemplate.kt
-// Helper code for Direction enum is found in EnumTemplate.kt
-// Helper code for LaunchException error is found in ErrorTemplate.kt
 

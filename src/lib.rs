@@ -1,13 +1,13 @@
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LaunchError {
     #[error("Failed to launch rocket")]
     RocketLaunch,
 }
 
 /// Which direction to point to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum Direction {
     Up,
     Down,
@@ -15,18 +15,22 @@ pub enum Direction {
 
 /// A vessel consists of several parts,
 /// such as the command pod, tanks or the engine.
+#[derive(uniffi::Record)]
 pub struct Part {
-    name: String,
-    cost: i64,
-    weight: i64,
+    pub name: String,
+    pub cost: i64,
+    pub weight: i64,
 }
 
 /// A rocket we can launch into orbit.
-struct Rocket(RwLock<Inner>);
+#[derive(uniffi::Object)]
+pub struct Rocket(RwLock<Inner>);
 
+#[uniffi::export]
 impl Rocket {
-    fn new(name: String) -> Self {
-        Self(RwLock::new(Inner::new(name)))
+    #[uniffi::constructor]
+    pub fn new(name: String) -> Arc<Self> {
+        Arc::new(Self(RwLock::new(Inner::new(name))))
     }
 
     fn add(&self, part: Part) {
@@ -34,9 +38,9 @@ impl Rocket {
         rocket.add(part)
     }
 
-    fn lock_steering(&self, dir: Direction) {
+    fn lock_steering(&self, direction: Direction) {
         let mut rocket = self.0.write().unwrap();
-        rocket.lock_steering(dir);
+        rocket.lock_steering(direction);
     }
 
     fn launch(&self) -> Result<bool> {
@@ -115,4 +119,4 @@ impl Inner {
 
 type Result<T, E = LaunchError> = std::result::Result<T, E>;
 
-uniffi_macros::include_scaffolding!("rocketscience");
+uniffi::setup_scaffolding!();

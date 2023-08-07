@@ -37,6 +37,9 @@ fn test() -> Result<()> {
         Err("invalid test target")?;
     }
 
+    // Required for Kotlin to load jna.jar
+    env::set_var("CLASSPATH", "jna.jar");
+
     match &*what {
         "all" => cmd!("cargo test -p rocketscience --tests").run()?,
         _ => {
@@ -49,10 +52,19 @@ fn test() -> Result<()> {
 }
 
 fn generate() -> Result<()> {
-    cmd!("uniffi-bindgen scaffolding ./src/rocketscience.udl -o bindings").run()?;
-    cmd!("uniffi-bindgen generate ./src/rocketscience.udl -l kotlin -o bindings").run()?;
-    cmd!("uniffi-bindgen generate ./src/rocketscience.udl -l swift -o bindings").run()?;
-    cmd!("uniffi-bindgen generate ./src/rocketscience.udl -l python -o bindings").run()?;
+    cmd!("cargo build").run()?;
+    #[cfg(target_os = "macos")]
+    let ext = "dylib";
+    #[cfg(windows)]
+    let ext = "dll";
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let ext = "so";
+
+    let library = format!("target/debug/librocketscience.{ext}");
+    for lang in ["kotlin", "swift", "python"] {
+        cmd!("cargo run -p uniffi-bindgen generate --library {library} --language {lang} --out-dir bindings").run()?;
+    }
+
     Ok(())
 }
 

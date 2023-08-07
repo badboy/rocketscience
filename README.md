@@ -27,16 +27,6 @@ cargo xtask test python
 ## Generate bindings code
 
 When just testing all code is generated at build time.
-If you want to generate the code for inspection,
-to check it into source control or for other purposes
-use [`uniffi_bindgen`].
-
-To install it:
-
-```
-cargo install uniffi_bindgen
-```
-
 To generate the bindings in the `bindings/` directory:
 
 ```

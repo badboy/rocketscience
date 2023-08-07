@@ -1,4 +1,1 @@
-uniffi_macros::build_foreign_language_testcases!(
-    ["src/rocketscience.udl"],
-    ["tests/bindings/test_rocketscience.kts"]
-);
+uniffi::build_foreign_language_testcases!("tests/bindings/test_rocketscience.kts");
