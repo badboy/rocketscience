@@ -31,6 +31,14 @@ import java.nio.charset.CodingErrorAction
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -364,30 +372,35 @@ internal interface _UniFFILib : Library {
             .also { lib: _UniFFILib ->
                 uniffiCheckContractApiVersion(lib)
                 uniffiCheckApiChecksums(lib)
+                FfiConverterForeignExecutor.register(lib)
                 }
         }
     }
 
-    fun uniffi_rocketscience_fn_free_rocket(`ptr`: Pointer,_uniffi_out_err: RustCallStatus,
+    fun uniffi_rocketscience_fn_free_rocket(`ptr`: Pointer,_uniffi_out_err: RustCallStatus, 
     ): Unit
-    fun uniffi_rocketscience_fn_constructor_rocket_new(`name`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus,
+    fun uniffi_rocketscience_fn_constructor_rocket_new(`name`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus, 
     ): Pointer
-    fun uniffi_rocketscience_fn_method_rocket_add(`ptr`: Pointer,`part`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus,
+    fun uniffi_rocketscience_fn_method_rocket_add(`ptr`: Pointer,`part`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus, 
     ): Unit
-    fun uniffi_rocketscience_fn_method_rocket_launch(`ptr`: Pointer,_uniffi_out_err: RustCallStatus,
+    fun uniffi_rocketscience_fn_method_rocket_launch(`ptr`: Pointer,_uniffi_out_err: RustCallStatus, 
     ): Byte
-    fun uniffi_rocketscience_fn_method_rocket_lock_steering(`ptr`: Pointer,`dir`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus,
+    fun uniffi_rocketscience_fn_method_rocket_lock_steering(`ptr`: Pointer,`direction`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus, 
     ): Unit
-    fun uniffi_rocketscience_fn_method_rocket_show(`ptr`: Pointer,_uniffi_out_err: RustCallStatus,
+    fun uniffi_rocketscience_fn_method_rocket_show(`ptr`: Pointer,_uniffi_out_err: RustCallStatus, 
     ): RustBuffer.ByValue
-    fun ffi_rocketscience_rustbuffer_alloc(`size`: Int,_uniffi_out_err: RustCallStatus,
-    ): RustBuffer.ByValue
-    fun ffi_rocketscience_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,_uniffi_out_err: RustCallStatus,
-    ): RustBuffer.ByValue
-    fun ffi_rocketscience_rustbuffer_free(`buf`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus,
+    fun uniffi_rocketscience_fn_func_launch_after(`rocket`: Pointer,`ms`: Long,`uniffiExecutor`: USize,`uniffiCallback`: UniFfiFutureCallbackByte,`uniffiCallbackData`: USize,_uniffi_out_err: RustCallStatus, 
     ): Unit
-    fun ffi_rocketscience_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Int,_uniffi_out_err: RustCallStatus,
+    fun ffi_rocketscience_rustbuffer_alloc(`size`: Int,_uniffi_out_err: RustCallStatus, 
     ): RustBuffer.ByValue
+    fun ffi_rocketscience_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,_uniffi_out_err: RustCallStatus, 
+    ): RustBuffer.ByValue
+    fun ffi_rocketscience_rustbuffer_free(`buf`: RustBuffer.ByValue,_uniffi_out_err: RustCallStatus, 
+    ): Unit
+    fun ffi_rocketscience_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Int,_uniffi_out_err: RustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_rocketscience_checksum_func_launch_after(
+    ): Short
     fun uniffi_rocketscience_checksum_method_rocket_add(
     ): Short
     fun uniffi_rocketscience_checksum_method_rocket_launch(
@@ -398,9 +411,11 @@ internal interface _UniFFILib : Library {
     ): Short
     fun uniffi_rocketscience_checksum_constructor_rocket_new(
     ): Short
+    fun uniffi_foreign_executor_callback_set(`callback`: UniFfiForeignExecutorCallback,
+    ): Unit
     fun ffi_rocketscience_uniffi_contract_version(
     ): Int
-
+    
 }
 
 private fun uniffiCheckContractApiVersion(lib: _UniFFILib) {
@@ -415,13 +430,16 @@ private fun uniffiCheckContractApiVersion(lib: _UniFFILib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: _UniFFILib) {
+    if (lib.uniffi_rocketscience_checksum_func_launch_after() != 29305.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_rocketscience_checksum_method_rocket_add() != 27179.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_rocketscience_checksum_method_rocket_launch() != 23461.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_rocketscience_checksum_method_rocket_lock_steering() != 49926.toShort()) {
+    if (lib.uniffi_rocketscience_checksum_method_rocket_lock_steering() != 48382.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_rocketscience_checksum_method_rocket_show() != 5898.toShort()) {
@@ -434,6 +452,26 @@ private fun uniffiCheckApiChecksums(lib: _UniFFILib) {
 
 // Public interface members begin here.
 
+
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
+    }
+
+    override fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
+
+    override fun lower(value: ULong): Long {
+        return value.toLong()
+    }
+
+    override fun allocationSize(value: ULong) = 8
+
+    override fun write(value: ULong, buf: ByteBuffer) {
+        buf.putLong(value.toLong())
+    }
+}
 
 public object FfiConverterLong: FfiConverter<Long, Long> {
     override fun lift(value: Long): Long {
@@ -693,10 +731,10 @@ abstract class FFIObject(
 }
 
 public interface RocketInterface {
-
+    
     fun `add`(`part`: Part)@Throws(LaunchException::class)
     fun `launch`(): Boolean
-    fun `lockSteering`(`dir`: Direction)
+    fun `lockSteering`(`direction`: Direction)
     fun `show`(): String
 }
 
@@ -731,44 +769,44 @@ class Rocket(
         _status)
 }
         }
-
-
-
+    
+    
+    
     @Throws(LaunchException::class)override fun `launch`(): Boolean =
         callWithPointer {
     rustCallWithError(LaunchException) { _status ->
     _UniFFILib.INSTANCE.uniffi_rocketscience_fn_method_rocket_launch(it,
-
+        
         _status)
 }
         }.let {
             FfiConverterBoolean.lift(it)
         }
-
-    override fun `lockSteering`(`dir`: Direction) =
+    
+    override fun `lockSteering`(`direction`: Direction) =
         callWithPointer {
     rustCall() { _status ->
     _UniFFILib.INSTANCE.uniffi_rocketscience_fn_method_rocket_lock_steering(it,
-        FfiConverterTypeDirection.lower(`dir`),
+        FfiConverterTypeDirection.lower(`direction`),
         _status)
 }
         }
-
-
+    
+    
     override fun `show`(): String =
         callWithPointer {
     rustCall() { _status ->
     _UniFFILib.INSTANCE.uniffi_rocketscience_fn_method_rocket_show(it,
-
+        
         _status)
 }
         }.let {
             FfiConverterString.lift(it)
         }
+    
+    
 
-
-
-
+    
 }
 
 public object FfiConverterTypeRocket: FfiConverter<Rocket, Pointer> {
@@ -796,12 +834,74 @@ public object FfiConverterTypeRocket: FfiConverter<Rocket, Pointer> {
 
 
 
+
+
+// Callback function to execute a Rust task.  The Kotlin code schedules these in a coroutine then
+// invokes them.
+internal interface UniFfiRustTaskCallback : com.sun.jna.Callback {
+    fun invoke(rustTaskData: Pointer?)
+}
+
+object UniFfiForeignExecutorCallback : com.sun.jna.Callback {
+    internal fun invoke(handle: USize, delayMs: Int, rustTask: UniFfiRustTaskCallback?, rustTaskData: Pointer?) {
+        if (rustTask == null) {
+            FfiConverterForeignExecutor.drop(handle)
+        } else {
+            val coroutineScope = FfiConverterForeignExecutor.lift(handle)
+            coroutineScope.launch {
+                if (delayMs > 0) {
+                    delay(delayMs.toLong())
+                }
+                rustTask.invoke(rustTaskData)
+            }
+        }
+    }
+}
+
+public object FfiConverterForeignExecutor: FfiConverter<CoroutineScope, USize> {
+    internal val handleMap = UniFfiHandleMap<CoroutineScope>()
+
+    internal fun drop(handle: USize) {
+        handleMap.remove(handle)
+    }
+
+    internal fun register(lib: _UniFFILib) {
+        lib.uniffi_foreign_executor_callback_set(UniFfiForeignExecutorCallback)
+    }
+
+    // Number of live handles, exposed so we can test the memory management
+    public fun handleCount() : Int {
+        return handleMap.size
+    }
+
+    override fun allocationSize(value: CoroutineScope) = USize.size
+
+    override fun lift(value: USize): CoroutineScope {
+        return handleMap.get(value) ?: throw RuntimeException("unknown handle in FfiConverterForeignExecutor.lift")
+    }
+
+    override fun read(buf: ByteBuffer): CoroutineScope {
+        return lift(USize.readFromBuffer(buf))
+    }
+
+    override fun lower(value: CoroutineScope): USize {
+        return handleMap.insert(value)
+    }
+
+    override fun write(value: CoroutineScope, buf: ByteBuffer) {
+        lower(value).writeToBuffer(buf)
+    }
+}
+
+
+
+
 data class Part (
-    var `name`: String,
-    var `cost`: Long,
+    var `name`: String, 
+    var `cost`: Long, 
     var `weight`: Long
 ) {
-
+    
 }
 
 public object FfiConverterTypePart: FfiConverterRustBuffer<Part> {
@@ -855,24 +955,24 @@ public object FfiConverterTypeDirection: FfiConverterRustBuffer<Direction> {
 
 sealed class LaunchException: Exception() {
     // Each variant is a nested class
-
+    
     class RocketLaunch(
         ) : LaunchException() {
         override val message
             get() = ""
     }
-
+    
 
     companion object ErrorHandler : CallStatusErrorHandler<LaunchException> {
         override fun lift(error_buf: RustBuffer.ByValue): LaunchException = FfiConverterTypeLaunchError.lift(error_buf)
     }
 
-
+    
 }
 
 public object FfiConverterTypeLaunchError : FfiConverterRustBuffer<LaunchException> {
     override fun read(buf: ByteBuffer): LaunchException {
-
+        
 
         return when(buf.getInt()) {
             1 -> LaunchException.RocketLaunch()
@@ -898,5 +998,115 @@ public object FfiConverterTypeLaunchError : FfiConverterRustBuffer<LaunchExcepti
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
+}
+// Async return type handlers
+
+
+
+
+
+
+
+
+
+
+
+// FFI type for callback handlers
+internal interface UniFfiFutureCallbackByte : com.sun.jna.Callback {
+    // Note: callbackData is always 0.  We could pass Rust a pointer/usize to represent the
+    // continuation, but with JNA it's easier to just store it in the callback handler.
+    fun invoke(_callbackData: USize, returnValue: Byte?, callStatus: RustCallStatus.ByValue);
+}
+internal interface UniFfiFutureCallbackPointer : com.sun.jna.Callback {
+    // Note: callbackData is always 0.  We could pass Rust a pointer/usize to represent the
+    // continuation, but with JNA it's easier to just store it in the callback handler.
+    fun invoke(_callbackData: USize, returnValue: Pointer?, callStatus: RustCallStatus.ByValue);
+}
+internal interface UniFfiFutureCallbackRustBuffer : com.sun.jna.Callback {
+    // Note: callbackData is always 0.  We could pass Rust a pointer/usize to represent the
+    // continuation, but with JNA it's easier to just store it in the callback handler.
+    fun invoke(_callbackData: USize, returnValue: RustBuffer.ByValue?, callStatus: RustCallStatus.ByValue);
+}
+
+// Callback handlers for an async call.  These are invoked by Rust when the future is ready.  They
+// lift the return value or error and resume the suspended function.
+
+internal class UniFfiFutureCallbackHandlerVoid(val continuation: Continuation<Unit>)
+    : UniFfiFutureCallbackByte {
+    override fun invoke(_callbackData: USize, returnValue: Byte?, callStatus: RustCallStatus.ByValue) {
+        try {
+            checkCallStatus(NullCallStatusErrorHandler, callStatus)
+            continuation.resume(Unit)
+        } catch (e: Throwable) {
+            continuation.resumeWithException(e)
+        }
+    }
+}
+
+internal class UniFfiFutureCallbackHandlerBoolean_TypeLaunchError(val continuation: Continuation<Boolean>)
+    : UniFfiFutureCallbackByte {
+    override fun invoke(_callbackData: USize, returnValue: Byte?, callStatus: RustCallStatus.ByValue) {
+        try {
+            checkCallStatus(LaunchException, callStatus)
+            continuation.resume(FfiConverterBoolean.lift(returnValue!!))
+        } catch (e: Throwable) {
+            continuation.resumeWithException(e)
+        }
+    }
+}
+
+internal class UniFfiFutureCallbackHandlerString(val continuation: Continuation<String>)
+    : UniFfiFutureCallbackRustBuffer {
+    override fun invoke(_callbackData: USize, returnValue: RustBuffer.ByValue?, callStatus: RustCallStatus.ByValue) {
+        try {
+            checkCallStatus(NullCallStatusErrorHandler, callStatus)
+            continuation.resume(FfiConverterString.lift(returnValue!!))
+        } catch (e: Throwable) {
+            continuation.resumeWithException(e)
+        }
+    }
+}
+
+internal class UniFfiFutureCallbackHandlerTypeRocket(val continuation: Continuation<Rocket>)
+    : UniFfiFutureCallbackPointer {
+    override fun invoke(_callbackData: USize, returnValue: Pointer?, callStatus: RustCallStatus.ByValue) {
+        try {
+            checkCallStatus(NullCallStatusErrorHandler, callStatus)
+            continuation.resume(FfiConverterTypeRocket.lift(returnValue!!))
+        } catch (e: Throwable) {
+            continuation.resumeWithException(e)
+        }
+    }
+}
+@Throws(LaunchException::class)
+
+@Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+suspend fun `launchAfter`(`rocket`: Rocket, `ms`: ULong) : Boolean {
+    // Create a new `CoroutineScope` for this operation, suspend the coroutine, and call the
+    // scaffolding function, passing it one of the callback handlers from `AsyncTypes.kt`.
+    //
+    // Make sure to retain a reference to the callback handler to ensure that it's not GCed before
+    // it's invoked
+    var callbackHolder: UniFfiFutureCallbackHandlerBoolean_TypeLaunchError? = null
+    return coroutineScope {
+        val scope = this
+        return@coroutineScope suspendCoroutine { continuation ->
+            try {
+                val callback = UniFfiFutureCallbackHandlerBoolean_TypeLaunchError(continuation)
+                callbackHolder = callback
+                rustCall { status ->
+                    _UniFFILib.INSTANCE.uniffi_rocketscience_fn_func_launch_after(
+                        FfiConverterTypeRocket.lower(`rocket`),FfiConverterULong.lower(`ms`),
+                        FfiConverterForeignExecutor.lower(scope),
+                        callback,
+                        USize(0),
+                        status,
+                    )
+                }
+            } catch (e: Exception) {
+                continuation.resumeWithException(e)
+            }
+        }
+    }
 }
 

@@ -10,6 +10,7 @@ crate-type = ["staticlib", "cdylib", "lib"]
 name = "rocketscience"
 
 [dependencies]
+async-std = "1.12.0"
 thiserror = "1.0.44"
 uniffi = { workspace = true }
 

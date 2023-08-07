@@ -74,9 +74,11 @@ void uniffi_rocketscience_fn_method_rocket_add(void*_Nonnull ptr, RustBuffer par
 );
 int8_t uniffi_rocketscience_fn_method_rocket_launch(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
-void uniffi_rocketscience_fn_method_rocket_lock_steering(void*_Nonnull ptr, RustBuffer dir, RustCallStatus *_Nonnull out_status
+void uniffi_rocketscience_fn_method_rocket_lock_steering(void*_Nonnull ptr, RustBuffer direction, RustCallStatus *_Nonnull out_status
 );
 RustBuffer uniffi_rocketscience_fn_method_rocket_show(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+void uniffi_rocketscience_fn_func_launch_after(void*_Nonnull rocket, uint64_t ms, size_t uniffi_executor, UniFfiFutureCallbackInt8 _Nonnull uniffi_callback, void* _Nonnull uniffi_callback_data, RustCallStatus *_Nonnull out_status
 );
 RustBuffer ffi_rocketscience_rustbuffer_alloc(int32_t size, RustCallStatus *_Nonnull out_status
 );
@@ -85,6 +87,9 @@ RustBuffer ffi_rocketscience_rustbuffer_from_bytes(ForeignBytes bytes, RustCallS
 void ffi_rocketscience_rustbuffer_free(RustBuffer buf, RustCallStatus *_Nonnull out_status
 );
 RustBuffer ffi_rocketscience_rustbuffer_reserve(RustBuffer buf, int32_t additional, RustCallStatus *_Nonnull out_status
+);
+uint16_t uniffi_rocketscience_checksum_func_launch_after(void
+    
 );
 uint16_t uniffi_rocketscience_checksum_method_rocket_add(void
     
@@ -100,6 +105,8 @@ uint16_t uniffi_rocketscience_checksum_method_rocket_show(void
 );
 uint16_t uniffi_rocketscience_checksum_constructor_rocket_new(void
     
+);
+void uniffi_foreign_executor_callback_set(UniFfiForeignExecutorCallback _Nonnull callback
 );
 uint32_t ffi_rocketscience_uniffi_contract_version(void
     

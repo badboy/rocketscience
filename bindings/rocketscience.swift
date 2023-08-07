@@ -294,6 +294,19 @@ private func uniffiCheckCallStatus(
 
 // Public interface members begin here.
 
+private struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
 private struct FfiConverterInt64: FfiConverterPrimitive {
     typealias FfiType = Int64
     typealias SwiftType = Int64
@@ -369,7 +382,7 @@ private struct FfiConverterString: FfiConverter {
 public protocol RocketProtocol {
     func add(part: Part)
     func launch() throws -> Bool
-    func lockSteering(dir: Direction)
+    func lockSteering(direction: Direction)
     func show() -> String
 }
 
@@ -411,11 +424,11 @@ public class Rocket: RocketProtocol {
         )
     }
 
-    public func lockSteering(dir: Direction) {
+    public func lockSteering(direction: Direction) {
         try!
             rustCall {
                 uniffi_rocketscience_fn_method_rocket_lock_steering(self.pointer,
-                                                                    FfiConverterTypeDirection.lower(dir), $0)
+                                                                    FfiConverterTypeDirection.lower(direction), $0)
             }
     }
 
@@ -465,6 +478,63 @@ public func FfiConverterTypeRocket_lift(_ pointer: UnsafeMutableRawPointer) thro
 
 public func FfiConverterTypeRocket_lower(_ value: Rocket) -> UnsafeMutableRawPointer {
     return FfiConverterTypeRocket.lower(value)
+}
+
+// Encapsulates an executor that can run Rust tasks
+//
+// On Swift, `Task.detached` can handle this we just need to know what priority to send it.
+public struct UniFfiForeignExecutor {
+    var priority: TaskPriority
+
+    public init(priority: TaskPriority) {
+        self.priority = priority
+    }
+
+    public init() {
+        priority = Task.currentPriority
+    }
+}
+
+private struct FfiConverterForeignExecutor: FfiConverter {
+    typealias SwiftType = UniFfiForeignExecutor
+    // Rust uses a pointer to represent the FfiConverterForeignExecutor, but we only need a u8.
+    // let's use `Int`, which is equivalent to `size_t`
+    typealias FfiType = Int
+
+    public static func lift(_ value: FfiType) throws -> SwiftType {
+        UniFfiForeignExecutor(priority: TaskPriority(rawValue: numericCast(value)))
+    }
+
+    public static func lower(_ value: SwiftType) -> FfiType {
+        numericCast(value.priority.rawValue)
+    }
+
+    public static func read(from _: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        fatalError("FfiConverterForeignExecutor.read not implemented yet")
+    }
+
+    public static func write(_: SwiftType, into _: inout [UInt8]) {
+        fatalError("FfiConverterForeignExecutor.read not implemented yet")
+    }
+}
+
+private func uniffiForeignExecutorCallback(executorHandle: Int, delayMs: UInt32, rustTask: UniFfiRustTaskCallback?, taskData: UnsafeRawPointer?) {
+    if let rustTask = rustTask {
+        let executor = try! FfiConverterForeignExecutor.lift(executorHandle)
+        Task.detached(priority: executor.priority) {
+            if delayMs != 0 {
+                let nanoseconds: UInt64 = numericCast(delayMs * 1_000_000)
+                try! await Task.sleep(nanoseconds: nanoseconds)
+            }
+            rustTask(taskData)
+        }
+    }
+    // No else branch: when rustTask is null, we should drop the foreign executor. However, since
+    // its just a value type, we don't need to do anything here.
+}
+
+private func uniffiInitForeignExecutor() {
+    uniffi_foreign_executor_callback_set(uniffiForeignExecutorCallback)
 }
 
 public struct Part {
@@ -598,7 +668,103 @@ public struct FfiConverterTypeLaunchError: FfiConverterRustBuffer {
 
 extension LaunchError: Equatable, Hashable {}
 
-extension LaunchError: Error {}
+extension LaunchError: Error {} // Callbacks for async functions
+
+// Callback handlers for an async calls.  These are invoked by Rust when the future is ready.  They
+// lift the return value or error and resume the suspended function.
+private func uniffiFutureCallbackHandlerVoid(
+    rawContinutation: UnsafeRawPointer,
+    returnValue _: UInt8,
+    callStatus: RustCallStatus
+) {
+    let continuation = rawContinutation.bindMemory(
+        to: CheckedContinuation<Void, Error>.self,
+        capacity: 1
+    )
+
+    do {
+        try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: nil)
+        continuation.pointee.resume(returning: ())
+    } catch {
+        continuation.pointee.resume(throwing: error)
+    }
+}
+
+private func uniffiFutureCallbackHandlerBoolTypeLaunchError(
+    rawContinutation: UnsafeRawPointer,
+    returnValue: Int8,
+    callStatus: RustCallStatus
+) {
+    let continuation = rawContinutation.bindMemory(
+        to: CheckedContinuation<Bool, Error>.self,
+        capacity: 1
+    )
+
+    do {
+        try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: FfiConverterTypeLaunchError.lift)
+        try continuation.pointee.resume(returning: FfiConverterBool.lift(returnValue))
+    } catch {
+        continuation.pointee.resume(throwing: error)
+    }
+}
+
+private func uniffiFutureCallbackHandlerString(
+    rawContinutation: UnsafeRawPointer,
+    returnValue: RustBuffer,
+    callStatus: RustCallStatus
+) {
+    let continuation = rawContinutation.bindMemory(
+        to: CheckedContinuation<String, Error>.self,
+        capacity: 1
+    )
+
+    do {
+        try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: nil)
+        try continuation.pointee.resume(returning: FfiConverterString.lift(returnValue))
+    } catch {
+        continuation.pointee.resume(throwing: error)
+    }
+}
+
+private func uniffiFutureCallbackHandlerTypeRocket(
+    rawContinutation: UnsafeRawPointer,
+    returnValue: UnsafeMutableRawPointer,
+    callStatus: RustCallStatus
+) {
+    let continuation = rawContinutation.bindMemory(
+        to: CheckedContinuation<Rocket, Error>.self,
+        capacity: 1
+    )
+
+    do {
+        try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: nil)
+        try continuation.pointee.resume(returning: FfiConverterTypeRocket.lift(returnValue))
+    } catch {
+        continuation.pointee.resume(throwing: error)
+    }
+}
+
+public func launchAfter(rocket: Rocket, ms: UInt64) async throws -> Bool {
+    var continuation: CheckedContinuation<Bool, Error>? = nil
+    // Suspend the function and call the scaffolding function, passing it a callback handler from
+    // `AsyncTypes.swift`
+    //
+    // Make sure to hold on to a reference to the continuation in the top-level scope so that
+    // it's not freed before the callback is invoked.
+    return try await withCheckedThrowingContinuation {
+        continuation = $0
+        try! rustCall {
+            uniffi_rocketscience_fn_func_launch_after(
+                FfiConverterTypeRocket.lower(rocket),
+                FfiConverterUInt64.lower(ms),
+                FfiConverterForeignExecutor.lower(UniFfiForeignExecutor()),
+                uniffiFutureCallbackHandlerBoolTypeLaunchError,
+                &continuation,
+                $0
+            )
+        }
+    }
+}
 
 private enum InitializationResult {
     case ok
@@ -616,13 +782,16 @@ private var initializationResult: InitializationResult {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if uniffi_rocketscience_checksum_func_launch_after() != 29305 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_rocketscience_checksum_method_rocket_add() != 27179 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_rocketscience_checksum_method_rocket_launch() != 23461 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_rocketscience_checksum_method_rocket_lock_steering() != 49926 {
+    if uniffi_rocketscience_checksum_method_rocket_lock_steering() != 48382 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_rocketscience_checksum_method_rocket_show() != 5898 {
@@ -632,6 +801,7 @@ private var initializationResult: InitializationResult {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiInitForeignExecutor()
     return InitializationResult.ok
 }
 

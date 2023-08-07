@@ -1,4 +1,7 @@
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use async_std::future::{pending, timeout};
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LaunchError {
@@ -20,6 +23,15 @@ pub struct Part {
     pub name: String,
     pub cost: i64,
     pub weight: i64,
+}
+
+
+/// Async function that says something after a certain time.
+#[uniffi::export]
+async fn launch_after(rocket: Arc<Rocket>, ms: u64) -> Result<bool> {
+    let never = pending::<()>();
+    timeout(Duration::from_millis(ms), never).await.unwrap_err();
+    rocket.launch()
 }
 
 /// A rocket we can launch into orbit.

@@ -1,3 +1,5 @@
+import asyncio
+
 from rocketscience import *
 
 command = Part(name = "Mk1 Command Pod", cost = 600, weight = 840)
@@ -20,3 +22,7 @@ except LaunchError.RocketLaunch:
 
 rocket.lock_steering(direction = Direction.UP)
 assert rocket.launch()
+
+# We can launch the rocket asynchronously
+rocket.lock_steering(direction = Direction.UP)
+assert asyncio.run(launch_after(rocket, 20))

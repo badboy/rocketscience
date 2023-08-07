@@ -21,7 +21,9 @@ import struct
 import contextlib
 import datetime
 import typing
+import asyncio
 import platform
+import asyncio
 
 # Used for default argument values
 _DEFAULT = object()
@@ -519,11 +521,13 @@ def _uniffi_check_contract_api_version(lib):
         raise InternalError("UniFFI contract version mismatch: try cleaning and rebuilding your project")
 
 def _uniffi_check_api_checksums(lib):
+    if lib.uniffi_rocketscience_checksum_func_launch_after() != 29305:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_rocketscience_checksum_method_rocket_add() != 27179:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_rocketscience_checksum_method_rocket_launch() != 23461:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_rocketscience_checksum_method_rocket_lock_steering() != 49926:
+    if lib.uniffi_rocketscience_checksum_method_rocket_lock_steering() != 48382:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_rocketscience_checksum_method_rocket_show() != 5898:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -566,6 +570,15 @@ _UniffiLib.uniffi_rocketscience_fn_method_rocket_show.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_rocketscience_fn_method_rocket_show.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_rocketscience_fn_func_launch_after.argtypes = (
+    ctypes.c_void_p,
+    ctypes.c_uint64,
+    ctypes.c_size_t,
+    _uniffi_future_callback_t(ctypes.c_int8),
+    ctypes.c_size_t,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_rocketscience_fn_func_launch_after.restype = None
 _UniffiLib.ffi_rocketscience_rustbuffer_alloc.argtypes = (
     ctypes.c_int32,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -587,6 +600,9 @@ _UniffiLib.ffi_rocketscience_rustbuffer_reserve.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.ffi_rocketscience_rustbuffer_reserve.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_rocketscience_checksum_func_launch_after.argtypes = (
+)
+_UniffiLib.uniffi_rocketscience_checksum_func_launch_after.restype = ctypes.c_uint16
 _UniffiLib.uniffi_rocketscience_checksum_method_rocket_add.argtypes = (
 )
 _UniffiLib.uniffi_rocketscience_checksum_method_rocket_add.restype = ctypes.c_uint16
@@ -602,6 +618,10 @@ _UniffiLib.uniffi_rocketscience_checksum_method_rocket_show.restype = ctypes.c_u
 _UniffiLib.uniffi_rocketscience_checksum_constructor_rocket_new.argtypes = (
 )
 _UniffiLib.uniffi_rocketscience_checksum_constructor_rocket_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_foreign_executor_callback_set.argtypes = (
+    _UNIFFI_FOREIGN_EXECUTOR_CALLBACK_T,
+)
+_UniffiLib.uniffi_foreign_executor_callback_set.restype = None
 _UniffiLib.ffi_rocketscience_uniffi_contract_version.argtypes = (
 )
 _UniffiLib.ffi_rocketscience_uniffi_contract_version.restype = ctypes.c_uint32
@@ -610,6 +630,19 @@ _uniffi_check_api_checksums(_UniffiLib)
 
 # Public interface members begin here.
 
+
+class _UniffiConverterUInt64(_UniffiConverterPrimitiveInt):
+    CLASS_NAME = "u64"
+    VALUE_MIN = 0
+    VALUE_MAX = 2**64
+
+    @staticmethod
+    def read(buf):
+        return buf.read_u64()
+
+    @staticmethod
+    def write_unchecked(value, buf):
+        buf.write_u64(value)
 
 class _UniffiConverterInt64(_UniffiConverterPrimitiveInt):
     CLASS_NAME = "i64"
@@ -722,10 +755,10 @@ class Rocket:
 
 
 
-    def lock_steering(self, dir: "Direction"):
+    def lock_steering(self, direction: "Direction"):
         
         _rust_call(_UniffiLib.uniffi_rocketscience_fn_method_rocket_lock_steering,self._pointer,
-        _UniffiConverterTypeDirection.lower(dir))
+        _UniffiConverterTypeDirection.lower(direction))
 
 
 
@@ -764,6 +797,49 @@ class _UniffiConverterTypeRocket:
     @staticmethod
     def lower(value):
         return value._pointer
+
+# FFI code for the ForeignExecutor type
+
+
+
+class _UniffiConverterForeignExecutor:
+    _pointer_manager = _UniffiPointerManager()
+
+    @classmethod
+    def lower(cls, eventloop):
+        if not isinstance(eventloop, asyncio.BaseEventLoop):
+            raise TypeError("_uniffi_executor_callback: Expected EventLoop instance")
+        return cls._pointer_manager.new_pointer(eventloop)
+
+    @classmethod
+    def write(cls, eventloop, buf):
+        buf.write_c_size_t(cls.lower(eventloop))
+
+    @classmethod
+    def read(cls, buf):
+        return cls.lift(buf.read_c_size_t())
+
+    @classmethod
+    def lift(cls, value):
+        return cls._pointer_manager.lookup(value)
+
+@_UNIFFI_FOREIGN_EXECUTOR_CALLBACK_T
+def _uniffi_executor_callback(eventloop_address, delay, task_ptr, task_data):
+    if task_ptr is None:
+        _UniffiConverterForeignExecutor._pointer_manager.release_pointer(eventloop_address)
+    else:
+        eventloop = _UniffiConverterForeignExecutor._pointer_manager.lookup(eventloop_address)
+        callback = _UNIFFI_RUST_TASK(task_ptr)
+        if delay == 0:
+            # This can be called from any thread, so make sure to use `call_soon_threadsafe'
+            eventloop.call_soon_threadsafe(callback, task_data)
+        else:
+            # For delayed tasks, we use `call_soon_threadsafe()` + `call_later()` to make the
+            # operation threadsafe
+            eventloop.call_soon_threadsafe(eventloop.call_later, delay / 1000.0, callback, task_data)
+
+# Register the callback with the scaffolding
+_UniffiLib.uniffi_foreign_executor_callback_set(_uniffi_executor_callback)
 
 
 class Part:
@@ -865,13 +941,70 @@ class _UniffiConverterTypeLaunchError(_UniffiConverterRustBuffer):
     @staticmethod
     def write(value, buf):
         if isinstance(value, LaunchError.RocketLaunch):
-            buf.write_i32(1)
+            buf.write_i32(1)# Callback handlers for async returns
+
+_UniffiPyFuturePointerManager = _UniffiPointerManager()
+
+# Callback handlers for an async calls.  These are invoked by Rust when the future is ready.  They
+# lift the return value or error and resolve the future, causing the async function to resume.
+@_uniffi_future_callback_t(ctypes.c_uint8)
+def _uniffi_async_callback_void__void(future_ptr, result, call_status):
+    future = _UniffiPyFuturePointerManager.release_pointer(future_ptr)
+    if future.cancelled():
+        return
+    try:
+        _uniffi_check_call_status(None, call_status)
+        future.set_result(None)
+    except BaseException as e:
+        future.set_exception(e)
+@_uniffi_future_callback_t(ctypes.c_int8)
+def _uniffi_async_callback_bool__type_launch_error(future_ptr, result, call_status):
+    future = _UniffiPyFuturePointerManager.release_pointer(future_ptr)
+    if future.cancelled():
+        return
+    try:
+        _uniffi_check_call_status(_UniffiConverterTypeLaunchError, call_status)
+        future.set_result(_UniffiConverterBool.lift(result))
+    except BaseException as e:
+        future.set_exception(e)
+@_uniffi_future_callback_t(_UniffiRustBuffer)
+def _uniffi_async_callback_string__void(future_ptr, result, call_status):
+    future = _UniffiPyFuturePointerManager.release_pointer(future_ptr)
+    if future.cancelled():
+        return
+    try:
+        _uniffi_check_call_status(None, call_status)
+        future.set_result(_UniffiConverterString.lift(result))
+    except BaseException as e:
+        future.set_exception(e)
+@_uniffi_future_callback_t(ctypes.c_void_p)
+def _uniffi_async_callback_type_rocket__void(future_ptr, result, call_status):
+    future = _UniffiPyFuturePointerManager.release_pointer(future_ptr)
+    if future.cancelled():
+        return
+    try:
+        _uniffi_check_call_status(None, call_status)
+        future.set_result(_UniffiConverterTypeRocket.lift(result))
+    except BaseException as e:
+        future.set_exception(e)
+
+async def launch_after(rocket: "Rocket",ms: "int"):
+    
+    
+    return await _rust_call_async(
+        _UniffiLib.uniffi_rocketscience_fn_func_launch_after,
+        _uniffi_async_callback_bool__type_launch_error,
+        
+        _UniffiConverterTypeRocket.lower(rocket),
+        _UniffiConverterUInt64.lower(ms)
+    )
 
 __all__ = [
     "InternalError",
     "Direction",
     "LaunchError",
     "Part",
+    "launch_after",
     "Rocket",
 ]
 
