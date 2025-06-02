@@ -28,4 +28,4 @@ members = [
 ]
 
 [workspace.dependencies]
-uniffi = { git = "https://github.com/mozilla/uniffi-rs/" }
+uniffi = "0.29.2"
