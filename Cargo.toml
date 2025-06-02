@@ -11,7 +11,7 @@ name = "rocketscience"
 
 [dependencies]
 async-std = "1.12.0"
-thiserror = "1.0.44"
+thiserror = "2.0.12"
 uniffi = { workspace = true }
 
 [build-dependencies]
